@@ -1,7 +1,10 @@
 mod database;
 mod clipboard;
 mod paster;
+mod ipc;
+mod autostart;
 
+use clap::Parser;
 use database::Database;
 use log::{info, error};
 use std::sync::Arc;
@@ -12,10 +15,67 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 slint::include_modules!();
 
+/// Легковесный менеджер буфера обмена для KDE Plasma 6 (Wayland)
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Запустить фоновый демон
+    #[arg(long)]
+    daemon: bool,
+
+    /// Запустить графическое окно
+    #[arg(long)]
+    popup: bool,
+
+    /// Установить автостарт для KDE Plasma
+    #[arg(long)]
+    install_autostart: bool,
+
+    /// Удалить автостарт для KDE Plasma
+    #[arg(long)]
+    remove_autostart: bool,
+}
+
 fn main() {
     env_logger::init();
-    info!("Starting maccy-kde...");
+    let args = Args::parse();
 
+    if args.install_autostart {
+        match autostart::install_autostart() {
+            Ok(_) => println!("Автостарт успешно установлен!"),
+            Err(e) => eprintln!("Ошибка установки автостарта: {}", e),
+        }
+        return;
+    }
+
+    if args.remove_autostart {
+        match autostart::remove_autostart() {
+            Ok(_) => println!("Автостарт успешно удален!"),
+            Err(e) => eprintln!("Ошибка удаления автостарта: {}", e),
+        }
+        return;
+    }
+
+    // Если ни один флаг не указан, запускаем всё (для разработки)
+    if !args.daemon && !args.popup {
+        info!("Starting maccy-kde in dev mode (everything)...");
+        run_all_in_one();
+        return;
+    }
+
+    if args.daemon {
+        info!("Starting maccy-kde daemon...");
+        run_daemon();
+    }
+
+    if args.popup {
+        info!("Starting maccy-kde popup...");
+        run_popup();
+    }
+}
+
+/// Для разработки: запускаем всё в одном процессе
+fn run_all_in_one() {
     // Initialize the database
     let db = match Database::new() {
         Ok(db) => Arc::new(db),
@@ -62,17 +122,30 @@ fn main() {
     let db_paste = db.clone();
     ui.on_paste_item(move |id| {
         info!("Paste item id={}", id);
-        // Find the text, touch it to update last_used_at, then paste
+        // Find the item, touch it to update last_used_at, then paste
         if let Ok(history) = db_paste.get_history() {
             if let Some(item) = history.iter().find(|i| i.id == id as i64) {
-                let text = item.value_text.clone();
-                let _ = db_paste.add_item(&text);
-                // Close window first, then paste into the focused app
-                let ui = ui_weak.unwrap();
-                ui.hide().unwrap();
-                // Small delay for window to close before simulating keys
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                paster::paste_text(&text);
+                // Update last_used_at
+                match item.data_type {
+                    crate::database::DataType::Text => {
+                        if let Some(text) = &item.value_text {
+                            let _ = db_paste.add_text_item(text);
+                            // Close window first, then paste into the focused app
+                            let ui = ui_weak.unwrap();
+                            ui.hide().unwrap();
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            paster::paste_text(text);
+                        }
+                    },
+                    crate::database::DataType::Image => {
+                        // TODO: Обработка вставки изображений
+                        if let Some(path) = &item.image_path {
+                            let ui = ui_weak.unwrap();
+                            ui.hide().unwrap();
+                            info!("Pasting image from: {:?}", path);
+                        }
+                    }
+                }
                 return;
             }
         }
@@ -111,6 +184,156 @@ fn main() {
     ui.run().unwrap();
 }
 
+/// Запустить демон
+fn run_daemon() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let db = match Database::new() {
+            Ok(db) => Arc::new(db),
+            Err(e) => {
+                error!("Failed to initialize database: {}", e);
+                return;
+            }
+        };
+
+        // Start background clipboard monitor
+        let db_monitor = db.clone();
+        tokio::spawn(async {
+            clipboard::start_clipboard_monitor(db_monitor).await;
+        });
+
+        // Start IPC server
+        if let Err(e) = ipc::start_ipc_server(db).await {
+            error!("Failed to start IPC server: {}", e);
+        }
+    });
+}
+
+/// Запустить popup
+fn run_popup() {
+    info!("Popup started, connecting to daemon...");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // Сначала попробуем подключиться к демону
+    match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
+        Ok(_) => {
+            // Если демон запущен, работаем через IPC
+            run_popup_with_ipc(rt);
+        },
+        Err(_) => {
+            // Если демон не запущен, запускаем всё в одном (для разработки)
+            info!("Daemon not running, starting in single-process mode");
+            run_all_in_one();
+        }
+    }
+}
+
+/// Запустить popup с подключением к демону через IPC
+fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
+    let ui = MaccyMenu::new().unwrap();
+
+    // Загрузить начальный список
+    let initial_history = match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
+        Ok(ipc::IpcResponse::History(items)) => items,
+        _ => vec![]
+    };
+    refresh_ui_items_from_history(&ui, &initial_history, "");
+
+    // --- Callback: search changed ---
+    let ui_weak = ui.as_weak();
+    let rt_for_search = rt.handle().clone();
+    ui.on_search_changed(move |text| {
+        let ui = ui_weak.unwrap();
+        let query = text.to_string();
+        if let Ok(ipc::IpcResponse::History(items)) = rt_for_search.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
+            refresh_ui_items_from_history(&ui, &items, &query);
+        }
+    });
+
+    // --- Callback: paste item ---
+    let ui_weak = ui.as_weak();
+    let rt_for_paste = rt.handle().clone();
+    ui.on_paste_item(move |id| {
+        info!("Paste item id={}", id);
+        let ui = ui_weak.unwrap();
+        ui.hide().unwrap();
+        let _ = rt_for_paste.block_on(ipc::send_command(ipc::IpcCommand::SelectItem { id: id as i64 }));
+    });
+
+    // --- Callback: delete item ---
+    let ui_weak = ui.as_weak();
+    let rt_for_delete = rt.handle().clone();
+    ui.on_delete_item(move |id| {
+        info!("Delete item id={}", id);
+        let ui = ui_weak.unwrap();
+        if let Ok(ipc::IpcResponse::History(items)) = rt_for_delete.block_on(ipc::send_command(ipc::IpcCommand::DeleteItem { id: id as i64 })) {
+            refresh_ui_items_from_history(&ui, &items, &ui.get_search_text().to_string());
+        }
+    });
+
+    // --- Callback: toggle pin ---
+    let ui_weak = ui.as_weak();
+    let rt_for_pin = rt.handle().clone();
+    ui.on_toggle_pin(move |id| {
+        info!("Toggle pin id={}", id);
+        let ui = ui_weak.unwrap();
+        if let Ok(ipc::IpcResponse::History(items)) = rt_for_pin.block_on(ipc::send_command(ipc::IpcCommand::TogglePin { id: id as i64 })) {
+            refresh_ui_items_from_history(&ui, &items, &ui.get_search_text().to_string());
+        }
+    });
+
+    // --- Callback: close ---
+    let ui_weak = ui.as_weak();
+    ui.on_request_close(move || {
+        let ui = ui_weak.unwrap();
+        ui.hide().unwrap();
+    });
+
+    ui.run().unwrap();
+}
+
+/// Refresh UI из списка ClipboardItem
+fn refresh_ui_items_from_history(ui: &MaccyMenu, items: &[database::ClipboardItem], query: &str) {
+    let filtered: Vec<&database::ClipboardItem> = if query.is_empty() {
+        items.iter().collect()
+    } else {
+        let matcher = SkimMatcherV2::default();
+        let mut scored: Vec<_> = items
+            .iter()
+            .filter_map(|item| {
+                let search_text = match &item.value_text {
+                    Some(text) => text,
+                    None => "Изображение",
+                };
+                matcher.fuzzy_match(search_text, query).map(|score| (item, score))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.into_iter().map(|(item, _)| item).collect()
+    };
+
+    let entries: Vec<ClipboardEntry> = filtered
+        .iter()
+        .map(|item| {
+            let display_text = match &item.value_text {
+                Some(text) if text.len() > 100 => format!("{}…", &text[..100]),
+                Some(text) => text.clone(),
+                None => "📷 Изображение".to_string(),
+            };
+            ClipboardEntry {
+                id: item.id as i32,
+                text: SharedString::from(display_text),
+                is_pinned: item.is_pinned,
+                shortcut_index: 0, // assigned by Slint via index
+            }
+        })
+        .collect();
+
+    let model = Rc::new(VecModel::from(entries));
+    ui.set_items(ModelRc::from(model));
+    ui.set_current_index(0);
+}
+
 /// Refresh the item list in the UI, applying optional fuzzy search filter
 fn refresh_ui_items(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
     let items = match db.get_history() {
@@ -128,7 +351,11 @@ fn refresh_ui_items(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
         let mut scored: Vec<_> = items
             .iter()
             .filter_map(|item| {
-                matcher.fuzzy_match(&item.value_text, query).map(|score| (item, score))
+                let search_text = match &item.value_text {
+                    Some(text) => text,
+                    None => "Изображение",
+                };
+                matcher.fuzzy_match(search_text, query).map(|score| (item, score))
             })
             .collect();
         scored.sort_by(|a, b| b.1.cmp(&a.1));
@@ -137,17 +364,18 @@ fn refresh_ui_items(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
 
     let entries: Vec<ClipboardEntry> = filtered
         .iter()
-        .map(|item| ClipboardEntry {
-            id: item.id as i32,
-            text: SharedString::from(
-                if item.value_text.len() > 100 {
-                    format!("{}…", &item.value_text[..100])
-                } else {
-                    item.value_text.clone()
-                }
-            ),
-            is_pinned: item.is_pinned,
-            shortcut_index: 0, // assigned by Slint via index
+        .map(|item| {
+            let display_text = match &item.value_text {
+                Some(text) if text.len() > 100 => format!("{}…", &text[..100]),
+                Some(text) => text.clone(),
+                None => "📷 Изображение".to_string(),
+            };
+            ClipboardEntry {
+                id: item.id as i32,
+                text: SharedString::from(display_text),
+                is_pinned: item.is_pinned,
+                shortcut_index: 0, // assigned by Slint via index
+            }
         })
         .collect();
 

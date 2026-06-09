@@ -1,0 +1,21 @@
+id: org.maccy_kde.ClipboardManager
+runtime: org.kde.Platform
+runtime-version: '6.6'
+sdk: org.kde.Sdk
+command: maccy-kde
+finish-args:
+  - --device=dri
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=session-bus
+  - --filesystem=xdg-data/maccy-kde:create
+  - --filesystem=xdg-cache/maccy-kde:create
+modules:
+  - name: maccy-kde
+    buildsystem: simple
+    build-commands:
+      - cargo build --release
+      - install -Dm755 target/release/maccy-kde /app/bin/maccy-kde
+    sources:
+      - type: dir
+        path: .
