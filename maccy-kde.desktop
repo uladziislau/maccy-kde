@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=maccy-kde
+Comment=Clipboard manager for KDE Plasma
+Exec=maccy-kde --daemon
+Icon=edit-paste
+Terminal=false
+Categories=Utility;
+Keywords=clipboard;manager;kde;
