@@ -1,5 +1,6 @@
 mod database;
 mod clipboard;
+mod paster;
 
 use database::Database;
 use log::{info, error};
@@ -61,13 +62,20 @@ fn main() {
     let db_paste = db.clone();
     ui.on_paste_item(move |id| {
         info!("Paste item id={}", id);
-        // Touch the item to update last_used_at
+        // Find the text, touch it to update last_used_at, then paste
         if let Ok(history) = db_paste.get_history() {
             if let Some(item) = history.iter().find(|i| i.id == id as i64) {
-                let _ = db_paste.add_item(&item.value_text);
+                let text = item.value_text.clone();
+                let _ = db_paste.add_item(&text);
+                // Close window first, then paste into the focused app
+                let ui = ui_weak.unwrap();
+                ui.hide().unwrap();
+                // Small delay for window to close before simulating keys
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                paster::paste_text(&text);
+                return;
             }
         }
-        // Close window after paste
         let ui = ui_weak.unwrap();
         ui.hide().unwrap();
     });
