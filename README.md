@@ -20,7 +20,38 @@ This project is a modern spiritual successor to macOS's [Maccy](https://github.c
 - **Keyboard-first:** Навигация стрелочками, мгновенный нечеткий (fuzzy) поиск при вводе текста, вставка элементов по горячим клавишам `Alt+1` .. `Alt+9`.
 - **Создано для Wayland:** Полная поддержка нативных протоколов безопасности Wayland без костылей из эпохи X11.
 - **Архитектура Демон/Клиент:** Фоновый процесс изолирован от графического интерфейса, что гарантирует работу утилиты со скоростью < 15 мс.
-- **Упаковка во Flatpak:** Единый контейнеризированный пакет, работающий на любом современном дистрибутиве Linux.
+- **Поддержка изображений:** Сохранение изображений из буфера обмена в кэш.
+- **Автостарт:** Легкая установка и удаление автостарта для KDE Plasma.
+
+### Установка
+
+#### Из исходных файлов (для всех дистрибутивов)
+1. Установите Rust: https://www.rust-lang.org/tools/install
+2. Склонируйте репозиторий:
+   ```bash
+   git clone <repo-url>
+   cd maccy-kde
+   ```
+3. Соберите и установите:
+   ```bash
+   cargo build --release
+   sudo cp target/release/maccy-kde /usr/local/bin/
+   ```
+4. Установите автостарт (необязательно):
+   ```bash
+   maccy-kde --install-autostart
+   ```
+
+#### Для Fedora 44+ (RPM-пакет, в разработке)
+В будущем будет доступен RPM-пакет для установки через `dnf`.
+
+#### Flatpak (в разработке)
+Сборка Flatpak будет доступна через `org.maccy_kde.ClipboardManager.yml`.
+
+### Использование
+1. Запустите демон: `maccy-kde --daemon`
+2. Создайте глобальную горячую клавишу в KDE Plasma для запуска `maccy-kde --popup`
+3. Используйте всплывающее окно для поиска и вставки элементов истории
 
 </details>
 
@@ -31,7 +62,38 @@ This project is a modern spiritual successor to macOS's [Maccy](https://github.c
 - **Keyboard-first UX:** Arrow navigation, instantaneous fuzzy searching as you type, and quick-paste via `Alt+1` to `Alt+9`.
 - **Wayland Native:** Designed entirely around modern Wayland security protocols via `smithay-clipboard`.
 - **Daemon/Client Architecture:** A headless background service separates core logic from the UI, ensuring popup opening speeds under 15ms.
-- **Flatpak Distribution:** Packaged into a single sandboxed bundle for effortless deployment across any Linux distribution.
+- **Image Support:** Save clipboard images to cache.
+- **Autostart:** Easy installation and removal of KDE Plasma autostart.
+
+## Installation
+
+### From Source (all distributions)
+1. Install Rust: https://www.rust-lang.org/tools/install
+2. Clone the repository:
+   ```bash
+   git clone <repo-url>
+   cd maccy-kde
+   ```
+3. Build and install:
+   ```bash
+   cargo build --release
+   sudo cp target/release/maccy-kde /usr/local/bin/
+   ```
+4. Optionally install autostart:
+   ```bash
+   maccy-kde --install-autostart
+   ```
+
+### Fedora 44+ (RPM package, coming soon)
+RPM package will be available via `dnf`.
+
+### Flatpak (coming soon)
+Flatpak build via `org.maccy_kde.ClipboardManager.yml`.
+
+## Usage
+1. Start the daemon: `maccy-kde --daemon`
+2. Create a global keyboard shortcut in KDE Plasma for `maccy-kde --popup`
+3. Use the popup to search and paste clipboard history
 
 ## 🏗️ Architecture Blueprint (Instruction for AI Agents)
 
