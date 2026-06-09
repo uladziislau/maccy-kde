@@ -6,25 +6,17 @@ authors = ["Ваше Имя <ваша.почта@example.com>"]
 description = "A lightweight, keyboard-first clipboard manager inspired by Maccy, built for KDE Plasma 6 (Wayland)"
 
 [dependencies]
-# Асинхронность и IPC (межпроцессное взаимодействие)
-tokio = { version = "1.35", features = ["full"] }
-
-# Работа с буфером обмена в Wayland
-smithay-clipboard = "0.7.0"
-
-# База данных истории
 rusqlite = { version = "0.30.0", features = ["bundled"] }
-
-# Графический интерфейс (ультра-легкий фреймворк)
+tokio = { version = "1.35", features = ["full"] }
+enigo = "0.2.1"
 slint = "1.1.0"
-
-# Fuzzy-поиск по истории
 fuzzy-matcher = "0.3.7"
-
-# Работа с системной шиной Linux (для хоткеев KDE)
-zbus = "3.14.1"
-
-# Утилиты
 chrono = "0.4.31"
 log = "0.4.20"
 env_logger = "0.10.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Нативный слушатель буфера Wayland
+smithay-clipboard = "0.7.0"
+# Работа с системной шиной (KDE Global Shortcuts)
+zbus = "3.14.1"
