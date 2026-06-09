@@ -42,6 +42,18 @@ This project is a modern spiritual successor to macOS's [Maccy](https://github.c
    maccy-kde --install-autostart
    ```
 
+#### macOS (для разработки)
+Для macOS (Apple Silicon/Intel) можно собрать .app пакет с помощью `cargo-bundle`:
+1. Установите cargo-bundle:
+   ```bash
+   cargo install cargo-bundle
+   ```
+2. Соберите приложение:
+   ```bash
+   cargo bundle --release
+   ```
+3. Готовый `.app` будет лежать в `target/release/bundle/osx/`
+
 #### Для Fedora 44+ (RPM-пакет, в разработке)
 В будущем будет доступен RPM-пакет для установки через `dnf`.
 
@@ -83,6 +95,18 @@ This project is a modern spiritual successor to macOS's [Maccy](https://github.c
    ```bash
    maccy-kde --install-autostart
    ```
+
+### macOS (development builds)
+For macOS (Apple Silicon/Intel) you can build a `.app` bundle using `cargo-bundle`:
+1. Install cargo-bundle:
+   ```bash
+   cargo install cargo-bundle
+   ```
+2. Build the app:
+   ```bash
+   cargo bundle --release
+   ```
+3. The `.app` bundle will be in `target/release/bundle/osx/`
 
 ### Fedora 44+ (RPM package, coming soon)
 RPM package will be available via `dnf`.

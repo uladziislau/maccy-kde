@@ -6,6 +6,26 @@ authors = ["Ваше Имя <ваша.почта@example.com"]
 description = "A lightweight, keyboard-first clipboard manager inspired by Maccy, built for KDE Plasma 6 (Wayland)"
 build = "build.rs"
 
+[package.metadata.bundle]
+name = "maccy-kde"
+identifier = "org.maccy-kde.clipboard"
+version = "0.1.0"
+resources = ["maccy-kde.desktop"]
+copyright = "Copyright (c) 2025"
+category = "Utility"
+long_description = """
+A lightweight, keyboard-first clipboard manager for Linux, built specifically for KDE Plasma 6 on Wayland.
+"""
+
+[package.metadata.bundle.osx]
+icon = "assets/icon.icns"
+minimize_window = false
+high_resolution = true
+info_plist_extra = {
+    LSUIElement = true,
+    NSRequiresAquaSystemAppearance = false
+}
+
 [dependencies]
 rusqlite = { version = "0.30.0", features = ["bundled"] }
 tokio = { version = "1.35", features = ["rt-multi-thread", "time", "macros", "net", "io-util"] }
