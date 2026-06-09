@@ -2,6 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use std::fs;
 use std::path::PathBuf;
 use chrono::Utc;
+use std::sync::Mutex;
 
 #[derive(Debug, PartialEq)]
 pub struct ClipboardItem {
@@ -13,7 +14,7 @@ pub struct ClipboardItem {
 }
 
 pub struct Database {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl Database {
@@ -26,14 +27,14 @@ impl Database {
         let conn = Connection::open(&db_path)?;
         Self::setup_schema(&conn)?;
 
-        Ok(Database { conn })
+        Ok(Database { conn: Mutex::new(conn) })
     }
 
     #[cfg(test)]
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::setup_schema(&conn)?;
-        Ok(Database { conn })
+        Ok(Database { conn: Mutex::new(conn) })
     }
 
     fn setup_schema(conn: &Connection) -> Result<()> {
@@ -64,29 +65,31 @@ impl Database {
 
     pub fn add_item(&self, text: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().unwrap();
 
-        let mut stmt = self.conn.prepare("SELECT id FROM clipboard_items WHERE value_text = ?1")?;
+        let mut stmt = conn.prepare("SELECT id FROM clipboard_items WHERE value_text = ?1")?;
         let existing_id: Option<i64> = stmt.query_row(params![text], |row| row.get(0)).optional()?;
+        drop(stmt);
 
         if let Some(id) = existing_id {
-            self.conn.execute(
+            conn.execute(
                 "UPDATE clipboard_items SET last_used_at = ?1 WHERE id = ?2",
                 params![now, id],
             )?;
         } else {
-            self.conn.execute(
+            conn.execute(
                 "INSERT INTO clipboard_items (value_text, last_used_at) VALUES (?1, ?2)",
                 params![text, now],
             )?;
         }
 
-        self.rotate_history()?;
+        self.rotate_history_locked(&conn)?;
         Ok(())
     }
 
-    fn rotate_history(&self) -> Result<()> {
+    fn rotate_history_locked(&self, conn: &Connection) -> Result<()> {
         let max_items = 200;
-        self.conn.execute(
+        conn.execute(
             "DELETE FROM clipboard_items 
              WHERE is_pinned = 0 
                AND id NOT IN (
@@ -101,7 +104,8 @@ impl Database {
     }
 
     pub fn get_history(&self) -> Result<Vec<ClipboardItem>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
             "SELECT id, value_text, is_pinned, pin_order, last_used_at 
              FROM clipboard_items 
              ORDER BY is_pinned DESC, pin_order ASC, last_used_at DESC 
@@ -126,11 +130,13 @@ impl Database {
     }
 
     pub fn toggle_pin(&self, id: i64) -> Result<()> {
-        let mut stmt = self.conn.prepare("SELECT is_pinned FROM clipboard_items WHERE id = ?1")?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT is_pinned FROM clipboard_items WHERE id = ?1")?;
         let is_pinned: i32 = stmt.query_row(params![id], |row| row.get(0))?;
+        drop(stmt);
         
         let new_status = if is_pinned == 0 { 1 } else { 0 };
-        self.conn.execute(
+        conn.execute(
             "UPDATE clipboard_items SET is_pinned = ?1 WHERE id = ?2",
             params![new_status, id],
         )?;
@@ -138,7 +144,8 @@ impl Database {
     }
 
     pub fn delete_item(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM clipboard_items WHERE id = ?1", params![id])?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM clipboard_items WHERE id = ?1", params![id])?;
         Ok(())
     }
 }

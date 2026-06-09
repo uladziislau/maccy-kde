@@ -16,7 +16,11 @@ log = "0.4.20"
 env_logger = "0.10.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Нативный слушатель буфера Wayland
-smithay-clipboard = "0.7.0"
+# Нативный слушатель буфера Wayland (без поллинга)
+wayland-clipboard-listener = "0.6.1"
 # Работа с системной шиной (KDE Global Shortcuts)
 zbus = "3.14.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Фолбэк для разработки на macOS (с поллингом)
+arboard = "3.4.0"

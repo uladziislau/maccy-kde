@@ -1,44 +1,32 @@
 mod database;
+mod clipboard;
 
 use database::Database;
 use log::{info, error};
+use std::sync::Arc;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::init();
     info!("Starting maccy-kde...");
 
     // Initialize the database
     let db = match Database::new() {
-        Ok(db) => db,
+        Ok(db) => Arc::new(db),
         Err(e) => {
             error!("Failed to initialize database: {}", e);
             return;
         }
     };
 
-    // Add a test item
-    if let Err(e) = db.add_item("Hello from Maccy-KDE!") {
-        error!("Failed to add test item: {}", e);
-    } else {
-        info!("Successfully added test item to the database.");
-    }
+    // Start background clipboard monitor
+    clipboard::start_clipboard_monitor(db.clone()).await;
 
-    // Print current history
-    match db.get_history() {
-        Ok(history) => {
-            info!("--- Current Clipboard History ---");
-            for item in history {
-                info!(
-                    "[{}] {} (Pinned: {})",
-                    item.id,
-                    item.value_text,
-                    item.is_pinned
-                );
-            }
-            info!("---------------------------------");
-        }
-        Err(e) => {
-            error!("Failed to get history: {}", e);
-        }
+    // TODO: Initialize Slint UI and Global Hotkeys
+    
+    // For now, loop forever so the monitor can run
+    info!("Background daemon is running...");
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
     }
 }
