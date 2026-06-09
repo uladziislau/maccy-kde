@@ -53,6 +53,17 @@ This project is a modern spiritual successor to macOS's [Maccy](https://github.c
    cargo bundle --release
    ```
 3. Готовый `.app` будет лежать в `target/release/bundle/osx/`
+4. Чтобы создать `.dmg` (для удобной установки):
+   ```bash
+   cd target/release/bundle/osx/
+   hdiutil create -volname "maccy-kde" -srcfolder ./maccy-kde.app -ov -format UDZO maccy-kde.dmg
+   ```
+
+### GitHub Releases
+Для автоматической сборки и публикации в Releases можно использовать GitHub Actions:
+- Создайте `.github/workflows/release.yml`
+- В workflow соберите бинарники для всех платформ, .app/.dmg для macOS, .rpm для Fedora и Flatpak
+- При создании релиза GitHub Actions автоматически выложит все артефакты в Releases
 
 #### Для Fedora 44+ (RPM-пакет, в разработке)
 В будущем будет доступен RPM-пакет для установки через `dnf`.
@@ -107,6 +118,17 @@ For macOS (Apple Silicon/Intel) you can build a `.app` bundle using `cargo-bundl
    cargo bundle --release
    ```
 3. The `.app` bundle will be in `target/release/bundle/osx/`
+4. To create a `.dmg` (for easy installation):
+   ```bash
+   cd target/release/bundle/osx/
+   hdiutil create -volname "maccy-kde" -srcfolder ./maccy-kde.app -ov -format UDZO maccy-kde.dmg
+   ```
+
+### GitHub Releases
+To automate building and publishing to Releases, you can use GitHub Actions:
+- Create a `.github/workflows/release.yml` workflow file
+- In the workflow, build binaries for all platforms, .app/.dmg for macOS, .rpm for Fedora, and Flatpak
+- When you create a release, GitHub Actions will automatically upload all artifacts to Releases
 
 ### Fedora 44+ (RPM package, coming soon)
 RPM package will be available via `dnf`.
