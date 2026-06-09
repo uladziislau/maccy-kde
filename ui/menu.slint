@@ -1,0 +1,247 @@
+import { VerticalBox, HorizontalBox, ListView, LineEdit, Palette } from "std-widgets.slint";
+
+// --- Data model for a single clipboard entry ---
+export struct ClipboardEntry {
+    id: int,
+    text: string,
+    is-pinned: bool,
+    shortcut-index: int, // 0 = no shortcut, 1-9 = Alt+N
+}
+
+// --- Individual list item ---
+component ClipItem inherits Rectangle {
+    in property <string> item-text;
+    in property <bool> pinned;
+    in property <bool> selected;
+    in property <int> shortcut-index;
+
+    callback clicked();
+
+    min-height: 32px;
+    border-radius: 6px;
+    background: selected ? #3584e4 : ta.has-hover ? #ffffff18 : transparent;
+
+    animate background { duration: 80ms; easing: ease-in-out; }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalBox {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+
+        // Pin icon
+        if pinned : Text {
+            text: "📌";
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+
+        // Main text (single line, ellipsis)
+        Text {
+            text: item-text;
+            font-size: 13px;
+            color: selected ? white : #e0e0e0;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+
+            animate color { duration: 80ms; }
+        }
+
+        // Shortcut badge (Alt+1 .. Alt+9)
+        if shortcut-index > 0 && shortcut-index <= 9 : Rectangle {
+            width: 36px;
+            height: 20px;
+            border-radius: 4px;
+            background: selected ? #ffffff30 : #ffffff12;
+
+            Text {
+                text: "⌥" + shortcut-index;
+                font-size: 11px;
+                color: #999;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// --- Main popup component ---
+export component MaccyMenu inherits Window {
+    title: "Maccy KDE";
+    // Compact size like Maccy
+    width: 340px;
+    min-height: 100px;
+    preferred-height: 420px;
+    background: #1e1e2eee;
+
+    // --- Properties ---
+    in property <[ClipboardEntry]> items: [];
+    in-out property <int> current-index: 0;
+    in-out property <string> search-text: "";
+
+    // --- Callbacks to Rust ---
+    callback paste-item(int);        // paste by id
+    callback delete-item(int);       // delete by id
+    callback toggle-pin(int);        // toggle pin by id
+    callback search-changed(string); // filter changed
+    callback request-close();        // close the popup
+
+    // --- Keyboard handler ---
+    fs := FocusScope {
+        key-pressed(event) => {
+            // Escape → close
+            if event.text == Key.Escape {
+                request-close();
+                return accept;
+            }
+
+            // Arrow Down
+            if event.text == Key.DownArrow {
+                if current-index < items.length - 1 {
+                    current-index += 1;
+                }
+                return accept;
+            }
+
+            // Arrow Up
+            if event.text == Key.UpArrow {
+                if current-index > 0 {
+                    current-index -= 1;
+                }
+                return accept;
+            }
+
+            // Enter → paste selected
+            if event.text == Key.Return {
+                if items.length > 0 {
+                    paste-item(items[current-index].id);
+                }
+                return accept;
+            }
+
+            // Delete / Backspace with Ctrl → delete item
+            if event.text == Key.Delete && event.modifiers.control {
+                if items.length > 0 {
+                    delete-item(items[current-index].id);
+                }
+                return accept;
+            }
+
+            // Alt+P → toggle pin
+            if event.text == "p" && event.modifiers.alt {
+                if items.length > 0 {
+                    toggle-pin(items[current-index].id);
+                }
+                return accept;
+            }
+
+            // Alt+1..9 → quick paste
+            if event.modifiers.alt {
+                if event.text == "1" { paste-item(items[0].id); return accept; }
+                if event.text == "2" && items.length > 1 { paste-item(items[1].id); return accept; }
+                if event.text == "3" && items.length > 2 { paste-item(items[2].id); return accept; }
+                if event.text == "4" && items.length > 3 { paste-item(items[3].id); return accept; }
+                if event.text == "5" && items.length > 4 { paste-item(items[4].id); return accept; }
+                if event.text == "6" && items.length > 5 { paste-item(items[5].id); return accept; }
+                if event.text == "7" && items.length > 6 { paste-item(items[6].id); return accept; }
+                if event.text == "8" && items.length > 7 { paste-item(items[7].id); return accept; }
+                if event.text == "9" && items.length > 8 { paste-item(items[8].id); return accept; }
+            }
+
+            reject
+        }
+    }
+
+    VerticalBox {
+        padding: 6px;
+        spacing: 4px;
+
+        // --- Search bar ---
+        Rectangle {
+            height: 36px;
+            border-radius: 8px;
+            background: #ffffff10;
+            border-width: 1px;
+            border-color: #ffffff15;
+
+            HorizontalBox {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 6px;
+
+                Text {
+                    text: "🔍";
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+
+                search-input := TextInput {
+                    font-size: 13px;
+                    color: #e0e0e0;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+
+                    edited => {
+                        root.search-text = self.text;
+                        root.current-index = 0;
+                        root.search-changed(self.text);
+                    }
+                }
+            }
+        }
+
+        // --- Separator ---
+        Rectangle {
+            height: 1px;
+            background: #ffffff10;
+        }
+
+        // --- Clipboard items list ---
+        lv := ListView {
+            vertical-stretch: 1;
+
+            for entry[i] in items : ClipItem {
+                item-text: entry.text;
+                pinned: entry.is-pinned;
+                selected: i == current-index;
+                shortcut-index: i < 9 ? i + 1 : 0;
+
+                clicked => {
+                    current-index = i;
+                    paste-item(entry.id);
+                }
+            }
+        }
+
+        // --- Footer ---
+        Rectangle {
+            height: 1px;
+            background: #ffffff10;
+        }
+        HorizontalBox {
+            height: 22px;
+            padding-left: 10px;
+            padding-right: 10px;
+
+            Text {
+                text: items.length + " items";
+                font-size: 11px;
+                color: #666;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Text {
+                text: "⌥P pin  ⌃⌫ delete  ⏎ paste";
+                font-size: 11px;
+                color: #555;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
