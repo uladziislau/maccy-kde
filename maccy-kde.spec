@@ -33,5 +33,5 @@ install -D -m 755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
-* Fri Jun 09 2025 Your Name <your-email@example.com> - 0.1.0-1
+* Tue Jun 09 2026 Uladzislau Darazhei <uladzislau.darazhei@gmail.com> - 0.1.0-1
 - Initial package

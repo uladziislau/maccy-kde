@@ -2,7 +2,7 @@
 name = "maccy-kde"
 version = "0.1.0"
 edition = "2021"
-authors = ["Ваше Имя <ваша.почта@example.com"]
+authors = ["Uladzislau Darazhei <uladzislau.darazhei@gmail.com>"]
 description = "A lightweight, keyboard-first clipboard manager inspired by Maccy, built for KDE Plasma 6 (Wayland)"
 build = "build.rs"
 
@@ -11,7 +11,7 @@ name = "maccy-kde"
 identifier = "org.maccy-kde.clipboard"
 version = "0.1.0"
 resources = ["maccy-kde.desktop"]
-copyright = "Copyright (c) 2025"
+copyright = "Copyright (c) 2026 Uladzislau Darazhei"
 category = "Utility"
 long_description = """
 A lightweight, keyboard-first clipboard manager for Linux, built specifically for KDE Plasma 6 on Wayland.
