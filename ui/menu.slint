@@ -4,33 +4,51 @@ import { VerticalBox, HorizontalBox, ListView, LineEdit, Palette } from "std-wid
 export struct ClipboardEntry {
     id: int,
     text: string,
+    timestamp: string,
     is-pinned: bool,
+    is-image: bool,
     shortcut-index: int, // 0 = no shortcut, 1-9 = Alt+N
 }
 
 // --- Individual list item ---
 component ClipItem inherits Rectangle {
     in property <string> item-text;
+    in property <string> timestamp;
     in property <bool> pinned;
     in property <bool> selected;
+    in property <bool> is-image;
     in property <int> shortcut-index;
 
     callback clicked();
 
-    min-height: 32px;
+    min-height: selected ? 48px : 32px;
     border-radius: 6px;
-    background: selected ? #3584e4 : ta.has-hover ? #ffffff18 : transparent;
+    background: selected ? Palette.selection-background : ta.has-hover ? Palette.alternate-background : transparent;
 
     animate background { duration: 80ms; easing: ease-in-out; }
+    animate min-height { duration: 120ms; easing: ease-in-out; }
 
     ta := TouchArea {
         clicked => { root.clicked(); }
+    }
+
+    Rectangle {
+        border-radius: 6px;
+        border-width: selected ? 1px : 0px;
+        border-color: Palette.selection-background.brighter(0.5);
     }
 
     HorizontalBox {
         padding-left: 12px;
         padding-right: 12px;
         spacing: 8px;
+
+        // Type icon
+        Text {
+            text: is-image ? "🖼️" : "📄";
+            font-size: 14px;
+            vertical-alignment: center;
+        }
 
         // Pin icon
         if pinned : Text {
@@ -39,16 +57,25 @@ component ClipItem inherits Rectangle {
             vertical-alignment: center;
         }
 
-        // Main text (single line, ellipsis)
+        // Main text
         Text {
             text: item-text;
             font-size: 13px;
-            color: selected ? white : #e0e0e0;
+            color: selected ? Palette.selection-foreground : Palette.foreground;
             overflow: elide;
+            wrap: selected ? word-wrap : no-wrap;
             vertical-alignment: center;
             horizontal-stretch: 1;
 
             animate color { duration: 80ms; }
+        }
+
+        // Timestamp
+        Text {
+            text: timestamp;
+            font-size: 10px;
+            color: selected ? #ffffffaa : #666;
+            vertical-alignment: center;
         }
 
         // Shortcut badge (Alt+1 .. Alt+9)
@@ -84,7 +111,7 @@ export component MaccyMenu inherits Window {
     width: 340px;
     min-height: 100px;
     preferred-height: 420px;
-    background: #1e1e2ecc;
+    background: Palette.background;
 
     // --- Properties ---
     in property <[ClipboardEntry]> items: [];
@@ -95,6 +122,7 @@ export component MaccyMenu inherits Window {
     callback paste-item(int);        // paste by id
     callback delete-item(int);       // delete by id
     callback toggle-pin(int);        // toggle pin by id
+    callback clear-unpinned();       // clear all unpinned items
     callback search-changed(string); // filter changed
     callback request-close();        // close the popup
 
@@ -112,6 +140,12 @@ export component MaccyMenu inherits Window {
                 if current-index < items.length - 1 {
                     current-index += 1;
                 }
+                return accept;
+            }
+
+            // Alt+Shift+C → clear unpinned
+            if event.text == "C" && event.modifiers.alt && event.modifiers.control {
+                clear-unpinned();
                 return accept;
             }
 
@@ -170,11 +204,11 @@ export component MaccyMenu inherits Window {
 
         // --- Search bar ---
         Rectangle {
-            height: 36px;
-            border-radius: 8px;
-            background: #ffffff10;
+            height: 38px;
+            border-radius: 10px;
+            background: Palette.alternate-background;
             border-width: 1px;
-            border-color: #ffffff15;
+            border-color: Palette.selection-background;
 
             HorizontalBox {
                 padding-left: 10px;
@@ -211,7 +245,9 @@ export component MaccyMenu inherits Window {
 
             for entry[i] in items : ClipItem {
                 item-text: entry.text;
+                timestamp: entry.timestamp;
                 pinned: entry.is-pinned;
+                is-image: entry.is-image;
                 selected: i == current-index;
                 shortcut-index: i < 9 ? i + 1 : 0;
 
@@ -242,7 +278,7 @@ export component MaccyMenu inherits Window {
             Rectangle { horizontal-stretch: 1; }
 
             Text {
-                text: "⌥P pin  ⌃⌫ delete  ⏎ paste";
+                text: "⌥P pin  ⌃⌫ delete  ⌃⌥C clear  ⏎ paste";
                 font-size: 11px;
                 color: #555;
                 vertical-alignment: center;

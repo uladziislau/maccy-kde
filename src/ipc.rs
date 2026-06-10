@@ -12,6 +12,7 @@ pub enum IpcCommand {
     SelectItem { id: i64 },
     TogglePin { id: i64 },
     DeleteItem { id: i64 },
+    ClearUnpinned,
     ShowPopup,
 }
 
@@ -157,6 +158,13 @@ async fn handle_command(cmd: IpcCommand, db: Arc<Database>) -> IpcResponse {
                 Err(e) => IpcResponse::Error(format!("Failed to get history after delete: {}", e)),
             },
             Err(e) => IpcResponse::Error(format!("Failed to delete item: {}", e)),
+        },
+        IpcCommand::ClearUnpinned => match db.clear_unpinned() {
+            Ok(_) => match db.get_history() {
+                Ok(items) => IpcResponse::History(items),
+                Err(e) => IpcResponse::Error(format!("Failed to get history after clear: {}", e)),
+            },
+            Err(e) => IpcResponse::Error(format!("Failed to clear unpinned: {}", e)),
         },
     }
 }

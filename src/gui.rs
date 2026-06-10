@@ -84,6 +84,16 @@ impl GuiManager {
             }
         });
 
+        // Clear Unpinned
+        let ui_clear = ui_weak.clone();
+        let db_clear = db_clone.clone();
+        ui.on_clear_unpinned(move || {
+            let _ = db_clear.clear_unpinned();
+            if let Some(ui) = ui_clear.upgrade() {
+                Self::refresh_ui(&ui, &db_clear, &ui.get_search_text());
+            }
+        });
+
         // Close
         let ui_close = ui_weak.clone();
         ui.on_request_close(move || {
@@ -147,6 +157,21 @@ impl GuiManager {
         ui.set_current_index(0);
     }
 
+    fn format_relative_time(millis: i64) -> String {
+        let now = chrono::Utc::now().timestamp_millis();
+        let diff = (now - millis).abs() / 1000; // diff in seconds
+
+        if diff < 60 {
+            "just now".to_string()
+        } else if diff < 3600 {
+            format!("{}m ago", diff / 60)
+        } else if diff < 86400 {
+            format!("{}h ago", diff / 3600)
+        } else {
+            format!("{}d ago", diff / 86400)
+        }
+    }
+
     fn filter_and_map_items(items: Vec<ClipboardItem>, query: &str) -> Vec<ClipboardEntry> {
         let filtered: Vec<ClipboardItem> = if query.is_empty() {
             items
@@ -172,7 +197,9 @@ impl GuiManager {
             ClipboardEntry {
                 id: item.id as i32,
                 text: SharedString::from(display_text),
+                timestamp: SharedString::from(Self::format_relative_time(item.last_used_at)),
                 is_pinned: item.is_pinned,
+                is_image: item.data_type == DataType::Image,
                 shortcut_index: if (i as i32) < 9 { (i as i32) + 1 } else { 0 },
             }
         }).collect()

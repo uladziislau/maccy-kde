@@ -323,6 +323,22 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
         });
     });
 
+    // --- Callback: clear unpinned ---
+    let ui_weak = ui.as_weak();
+    ui.on_clear_unpinned(move || {
+        info!("Clear unpinned");
+        let ui_for_task = ui_weak.clone();
+        tokio::spawn(async move {
+            if let Ok(ipc::IpcResponse::History(items)) = ipc::send_command(ipc::IpcCommand::ClearUnpinned).await {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_for_task.upgrade() {
+                        GuiManager::refresh_ui_from_history(&ui, items, &ui.get_search_text());
+                    }
+                });
+            }
+        });
+    });
+
     // --- Callback: close ---
     let ui_weak = ui.as_weak();
     ui.on_request_close(move || {
