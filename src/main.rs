@@ -254,6 +254,7 @@ fn run_popup() {
 /// Запустить popup с подключением к демону через IPC
 fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     let ui = MaccyMenu::new().unwrap();
+    let _keeper = Keeper::new().unwrap(); // Keep event loop alive
 
     // Загрузить начальный список
     let initial_history = match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory { query: None })) {
