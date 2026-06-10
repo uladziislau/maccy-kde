@@ -101,7 +101,7 @@ async fn handle_command(cmd: IpcCommand, db: Arc<Database>) -> IpcResponse {
         IpcCommand::GetHistory { query } => match db.get_history() {
             Ok(items) => {
                 if let Some(q) = query {
-                    let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+                    let matcher = crate::get_matcher();
                     let mut scored: Vec<_> = items
                         .into_iter()
                         .filter_map(|item| {

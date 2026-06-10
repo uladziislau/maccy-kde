@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::rc::Rc;
 use slint::{ModelRc, VecModel, SharedString, Weak, ComponentHandle};
 use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use log::info;
 use crate::database::{Database, ClipboardItem, DataType};
 use crate::paster;
@@ -172,11 +171,19 @@ impl GuiManager {
         }
     }
 
+    fn is_likely_code(text: &str) -> bool {
+        let code_indicators = ["{", "}", ";", "fn ", "let ", "var ", "const ", "import ", "from ", "public ", "private ", "class "];
+        if text.lines().count() > 1 {
+            return true;
+        }
+        code_indicators.iter().any(|&ind| text.contains(ind))
+    }
+
     fn filter_and_map_items(items: Vec<ClipboardItem>, query: &str) -> Vec<ClipboardEntry> {
         let filtered: Vec<ClipboardItem> = if query.is_empty() {
             items
         } else {
-            let matcher = SkimMatcherV2::default();
+            let matcher = crate::get_matcher();
             let mut scored: Vec<_> = items
                 .into_iter()
                 .filter_map(|item| {
@@ -194,12 +201,14 @@ impl GuiManager {
                 Some(text) => text.clone(),
                 None => "📷 Изображение".to_string(),
             };
+            let is_code = item.value_text.as_ref().map(|t| Self::is_likely_code(t)).unwrap_or(false);
             ClipboardEntry {
                 id: item.id as i32,
                 text: SharedString::from(display_text),
                 timestamp: SharedString::from(Self::format_relative_time(item.last_used_at)),
                 is_pinned: item.is_pinned,
                 is_image: item.data_type == DataType::Image,
+                is_code,
                 shortcut_index: if (i as i32) < 9 { (i as i32) + 1 } else { 0 },
             }
         }).collect()

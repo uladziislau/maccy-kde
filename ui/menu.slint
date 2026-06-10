@@ -7,6 +7,7 @@ export struct ClipboardEntry {
     timestamp: string,
     is-pinned: bool,
     is-image: bool,
+    is-code: bool,
     shortcut-index: int, // 0 = no shortcut, 1-9 = Alt+N
 }
 
@@ -17,6 +18,7 @@ component ClipItem inherits Rectangle {
     in property <bool> pinned;
     in property <bool> selected;
     in property <bool> is-image;
+    in property <bool> is-code;
     in property <int> shortcut-index;
 
     callback clicked();
@@ -61,6 +63,7 @@ component ClipItem inherits Rectangle {
         Text {
             text: item-text;
             font-size: 13px;
+            font-family: is-code ? "Monospace" : "sans-serif";
             color: selected ? Palette.selection-foreground : Palette.foreground;
             overflow: elide;
             wrap: selected ? word-wrap : no-wrap;
@@ -248,6 +251,7 @@ export component MaccyMenu inherits Window {
                 timestamp: entry.timestamp;
                 pinned: entry.is-pinned;
                 is-image: entry.is-image;
+                is-code: entry.is-code;
                 selected: i == current-index;
                 shortcut-index: i < 9 ? i + 1 : 0;
 

@@ -71,6 +71,8 @@ fn is_sensitive_mime(mime: &str) -> bool {
         "application/x-password-manager-hint",
         "text/x-password",
         "secret",
+        "password",
+        "private",
     ];
     sensitive_mimes.iter().any(|&m| mime.contains(m))
 }
