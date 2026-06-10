@@ -32,6 +32,9 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
                         error!("Failed to add text item to DB: {}", e);
                     } else {
                         info!("Copied new text item to DB: {:.20}...", trimmed);
+                        slint::invoke_from_event_loop(|| {
+                            crate::refresh_ui();
+                        }).unwrap();
                     }
                 }
             }
@@ -90,6 +93,9 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
                             error!("Failed to add text item to DB: {}", e);
                         } else {
                             info!("Copied new text item to DB: {:.20}...", trimmed);
+                        slint::invoke_from_event_loop(|| {
+                            crate::refresh_ui();
+                        }).unwrap();
                         }
                         continue;
                     }
@@ -103,6 +109,9 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
                         error!("Failed to add image item to DB: {}", e);
                     } else {
                         info!("Copied new image item to DB (type: {})", mime_type);
+                        slint::invoke_from_event_loop(|| {
+                            crate::refresh_ui();
+                        }).unwrap();
                     }
                 }
             }

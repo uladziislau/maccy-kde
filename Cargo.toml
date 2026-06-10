@@ -26,10 +26,14 @@ info_plist_extra = {
     NSRequiresAquaSystemAppearance = false
 }
 
+[lib]
+name = "maccy_kde"
+path = "src/lib.rs"
+
 [dependencies]
 rusqlite = { version = "0.30.0", features = ["bundled"] }
 tokio = { version = "1.35", features = ["rt-multi-thread", "time", "macros", "net", "io-util"] }
-enigo = { version = "0.2.1", default-features = false, features = ["wayland"] }
+enigo = { version = "0.2.1" }
 slint = "1.16.1"
 fuzzy-matcher = "0.3.7"
 chrono = "0.4.31"
