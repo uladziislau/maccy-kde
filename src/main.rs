@@ -5,7 +5,7 @@ use log::{info, error};
 use std::sync::Arc;
 use slint::ComponentHandle;
 use maccy_kde::database::Database;
-use maccy_kde::gui::{GuiManager, MaccyMenu};
+use maccy_kde::gui::{GuiManager, MaccyMenu, Keeper};
 use maccy_kde::{clipboard, ipc, autostart, GlobalState};
 
 
@@ -157,8 +157,10 @@ fn run_all_in_one() {
 
     // Create the Slint UI
     let ui = MaccyMenu::new().unwrap();
+    let _keeper = Keeper::new().unwrap(); // Keep event loop alive
     let gui = GuiManager::new(ui.clone_strong(), db.clone());
     gui.setup_callbacks();
+    ui.show().unwrap();
 
     // Run the Slint event loop
     ui.run().unwrap();
@@ -224,6 +226,8 @@ fn run_daemon() {
     });
 
     info!("Daemon running with UI prepared.");
+    // Don't show window by default when running daemon mode
+    let _keeper = Keeper::new().unwrap(); // Keep event loop alive
     ui.run().unwrap();
 }
 
@@ -325,5 +329,6 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
         let _ = ui.hide();
     });
 
+    ui.show().unwrap();
     ui.run().unwrap();
 }

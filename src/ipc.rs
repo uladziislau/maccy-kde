@@ -80,7 +80,9 @@ async fn handle_client(stream: UnixStream, db: Arc<Database>) {
                 if let Err(e) = stream.write_all(resp_json.as_bytes()).await {
                     error!("Failed to write response: {}", e);
                 }
-                let _ = stream.write_all(b"\n").await;
+                if let Err(e) = stream.write_all("\n".as_bytes()).await {
+                       error!("Failed to write newline: {}", e);
+                   }
             }
             Err(e) => error!("Failed to parse command: {}", e),
         }
@@ -129,7 +131,9 @@ async fn handle_command(cmd: IpcCommand, db: Arc<Database>) -> IpcResponse {
                             }
                         }
                         DataType::Image => {
-                            // TODO: Активировать буфер обмена и вставить изображение
+                            if let Some(path) = &item.image_path {
+                                crate::paster::paste_image(path);
+                            }
                         }
                     }
                     // Возвращаем обновленную историю

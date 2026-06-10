@@ -65,6 +65,31 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
     });
 }
 
+fn is_sensitive_mime(mime: &str) -> bool {
+    let sensitive_mimes = [
+        "x-kde-passwordManagerHint",
+        "application/x-password-manager-hint",
+        "text/x-password",
+        "secret",
+    ];
+    sensitive_mimes.iter().any(|&m| mime.contains(m))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_sensitive_mime() {
+        assert!(is_sensitive_mime("x-kde-passwordManagerHint"));
+        assert!(is_sensitive_mime("application/x-password-manager-hint"));
+        assert!(is_sensitive_mime("text/x-password"));
+        assert!(is_sensitive_mime("some-secret-data"));
+        assert!(!is_sensitive_mime("text/plain"));
+        assert!(!is_sensitive_mime("image/png"));
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub async fn start_clipboard_monitor(db: Arc<Database>) {
     use wayland_clipboard_listener::{WlClipboardPasteStream, WlListenType};
@@ -83,6 +108,12 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
         for message in stream.paste_stream().flatten() {
             let content = message.context.context;
             let mime_type = message.context.mime_type;
+
+            // Игнорируем чувствительные данные от менеджеров паролей
+            if is_sensitive_mime(&mime_type) {
+                info!("Ignoring sensitive clipboard data (MIME: {})", mime_type);
+                continue;
+            }
 
             // Проверяем, текст ли это
             if mime_type.starts_with("text/") {

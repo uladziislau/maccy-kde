@@ -69,6 +69,12 @@ component ClipItem inherits Rectangle {
     }
 }
 
+// --- Component to keep the event loop alive ---
+export component Keeper inherits Window {
+    width: 0;
+    height: 0;
+}
+
 // --- Main popup component ---
 export component MaccyMenu inherits Window {
     title: "Maccy KDE";
@@ -181,10 +187,7 @@ export component MaccyMenu inherits Window {
                     vertical-alignment: center;
                 }
 
-                search-input := TextInput {
-                    font-size: 13px;
-                    color: #e0e0e0;
-                    vertical-alignment: center;
+                search-input := LineEdit {
                     horizontal-stretch: 1;
 
                     edited => {
