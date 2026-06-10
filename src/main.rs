@@ -1,19 +1,13 @@
-mod database;
-mod clipboard;
-mod paster;
-mod ipc;
-mod autostart;
-
+use fs2::FileExt;
+use std::fs::File;
 use clap::Parser;
-use database::Database;
 use log::{info, error};
 use std::sync::Arc;
-use slint::{ModelRc, VecModel, SharedString};
-use std::rc::Rc;
-use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
+use slint::ComponentHandle;
+use maccy_kde::database::Database;
+use maccy_kde::gui::{GuiManager, MaccyMenu};
+use maccy_kde::{clipboard, ipc, autostart, GlobalState};
 
-slint::include_modules!();
 
 /// Легковесный менеджер буфера обмена для KDE Plasma 6 (Wayland)
 #[derive(Parser, Debug)]
@@ -39,6 +33,22 @@ struct Args {
 fn main() {
     env_logger::init();
     let args = Args::parse();
+
+    let _lock_file = if args.daemon || (!args.daemon && !args.popup) {
+        let lock_path = std::env::temp_dir().join("maccy-kde.lock");
+        let file = File::create(&lock_path).expect("Failed to create lock file");
+        if file.try_lock_exclusive().is_err() {
+            if args.daemon {
+                eprintln!("Daemon is already running.");
+                std::process::exit(1);
+            }
+            None
+        } else {
+            Some(file)
+        }
+    } else {
+        None
+    };
 
     if args.install_autostart {
         match autostart::install_autostart() {
@@ -69,10 +79,54 @@ fn main() {
     }
 
     if args.popup {
-        info!("Starting maccy-kde popup...");
-        run_popup();
+        info!("Requesting popup from daemon...");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match rt.block_on(ipc::send_command(ipc::IpcCommand::ShowPopup)) {
+            Ok(_) => {
+                info!("Popup requested successfully");
+                return;
+            },
+            Err(e) => {
+                error!("Failed to request popup: {}", e);
+                info!("Starting popup in standalone mode...");
+                run_popup();
+                return;
+            }
+        }
     }
 }
+
+struct DaemonIpc;
+
+#[zbus::dbus_interface(name = "org.maccy_kde.Daemon")]
+impl DaemonIpc {
+    async fn show(&self) {
+        slint::invoke_from_event_loop(|| {
+            maccy_kde::show_ui();
+        }).unwrap();
+    }
+}
+
+async fn start_dbus_server() -> Result<(), Box<dyn std::error::Error>> {
+    use zbus::ConnectionBuilder;
+    let _conn = ConnectionBuilder::session()?
+        .name("org.maccy_kde.Daemon")?
+        .serve_at("/org/maccy_kde/Daemon", DaemonIpc)?
+        .build()
+        .await?;
+
+    info!("DBus server started at org.maccy_kde.Daemon");
+    // Keep connection alive
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
+async fn register_global_shortcut() -> Result<(), Box<dyn std::error::Error>> {
+    info!("KDE Global Shortcut: you can now map Meta+Shift+V to DBus call: org.maccy_kde.Daemon /org/maccy_kde/Daemon org.maccy_kde.Daemon.show");
+    Ok(())
+}
+
+
 
 /// Для разработки: запускаем всё в одном процессе
 fn run_all_in_one() {
@@ -103,82 +157,8 @@ fn run_all_in_one() {
 
     // Create the Slint UI
     let ui = MaccyMenu::new().unwrap();
-
-    // Load initial history
-    let db_ui = db.clone();
-    refresh_ui_items(&ui, &db_ui, "");
-
-    // --- Callback: search changed ---
-    let ui_weak = ui.as_weak();
-    let db_search = db.clone();
-    ui.on_search_changed(move |text| {
-        let ui = ui_weak.unwrap();
-        let query = text.to_string();
-        refresh_ui_items(&ui, &db_search, &query);
-    });
-
-    // --- Callback: paste item ---
-    let ui_weak = ui.as_weak();
-    let db_paste = db.clone();
-    ui.on_paste_item(move |id| {
-        info!("Paste item id={}", id);
-        // Find the item, touch it to update last_used_at, then paste
-        if let Ok(history) = db_paste.get_history() {
-            if let Some(item) = history.iter().find(|i| i.id == id as i64) {
-                // Update last_used_at
-                match item.data_type {
-                    crate::database::DataType::Text => {
-                        if let Some(text) = &item.value_text {
-                            let _ = db_paste.add_text_item(text);
-                            // Close window first, then paste into the focused app
-                            let ui = ui_weak.unwrap();
-                            ui.hide().unwrap();
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            paster::paste_text(text);
-                        }
-                    },
-                    crate::database::DataType::Image => {
-                        // TODO: Обработка вставки изображений
-                        if let Some(path) = &item.image_path {
-                            let ui = ui_weak.unwrap();
-                            ui.hide().unwrap();
-                            info!("Pasting image from: {:?}", path);
-                        }
-                    }
-                }
-                return;
-            }
-        }
-        let ui = ui_weak.unwrap();
-        ui.hide().unwrap();
-    });
-
-    // --- Callback: delete item ---
-    let ui_weak = ui.as_weak();
-    let db_del = db.clone();
-    ui.on_delete_item(move |id| {
-        info!("Delete item id={}", id);
-        let _ = db_del.delete_item(id as i64);
-        let ui = ui_weak.unwrap();
-        refresh_ui_items(&ui, &db_del, &ui.get_search_text().to_string());
-    });
-
-    // --- Callback: toggle pin ---
-    let ui_weak = ui.as_weak();
-    let db_pin = db.clone();
-    ui.on_toggle_pin(move |id| {
-        info!("Toggle pin id={}", id);
-        let _ = db_pin.toggle_pin(id as i64);
-        let ui = ui_weak.unwrap();
-        refresh_ui_items(&ui, &db_pin, &ui.get_search_text().to_string());
-    });
-
-    // --- Callback: close ---
-    let ui_weak = ui.as_weak();
-    ui.on_request_close(move || {
-        let ui = ui_weak.unwrap();
-        ui.hide().unwrap();
-    });
+    let gui = GuiManager::new(ui.clone_strong(), db.clone());
+    gui.setup_callbacks();
 
     // Run the Slint event loop
     ui.run().unwrap();
@@ -186,28 +166,67 @@ fn run_all_in_one() {
 
 /// Запустить демон
 fn run_daemon() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let db = match Database::new() {
-            Ok(db) => Arc::new(db),
-            Err(e) => {
-                error!("Failed to initialize database: {}", e);
-                return;
-            }
-        };
-
-        // Start background clipboard monitor
-        let db_monitor = db.clone();
-        tokio::spawn(async {
-            clipboard::start_clipboard_monitor(db_monitor).await;
-        });
-
-        // Start IPC server
-        if let Err(e) = ipc::start_ipc_server(db).await {
-            error!("Failed to start IPC server: {}", e);
+    let db = match Database::new() {
+        Ok(db) => Arc::new(db),
+        Err(e) => {
+            error!("Failed to initialize database: {}", e);
+            return;
         }
+    };
+
+    let ui = MaccyMenu::new().unwrap();
+    let gui = GuiManager::new(ui.clone_strong(), db.clone());
+    gui.setup_callbacks();
+
+    {
+        let mut state_lock = maccy_kde::get_state().lock().unwrap();
+        *state_lock = Some(GlobalState {
+            gui: Some(gui),
+            db: db.clone(),
+        });
+    }
+
+    // Register global shortcut via DBus (KDE kglobalaccel)
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            if let Err(e) = register_global_shortcut().await {
+                error!("Failed to register global shortcut: {}", e);
+            }
+        });
     });
+
+    // Start background threads
+    let db_monitor = db.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::spawn(async move {
+                clipboard::start_clipboard_monitor(db_monitor).await;
+            });
+
+            tokio::spawn(async move {
+                if let Err(e) = start_dbus_server().await {
+                    error!("Failed to start DBus server: {}", e);
+                }
+            });
+
+            if let Err(e) = ipc::start_ipc_server(db).await {
+                error!("Failed to start IPC server: {}", e);
+            }
+        });
+    });
+
+    info!("Daemon running with UI prepared.");
+    ui.run().unwrap();
 }
+
 
 /// Запустить popup
 fn run_popup() {
@@ -215,7 +234,7 @@ fn run_popup() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     // Сначала попробуем подключиться к демону
-    match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
+    match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory { query: None })) {
         Ok(_) => {
             // Если демон запущен, работаем через IPC
             run_popup_with_ipc(rt);
@@ -233,153 +252,78 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     let ui = MaccyMenu::new().unwrap();
 
     // Загрузить начальный список
-    let initial_history = match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
+    let initial_history = match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory { query: None })) {
         Ok(ipc::IpcResponse::History(items)) => items,
         _ => vec![]
     };
-    refresh_ui_items_from_history(&ui, &initial_history, "");
+    GuiManager::refresh_ui_from_history(&ui, initial_history, "");
 
     // --- Callback: search changed ---
     let ui_weak = ui.as_weak();
-    let rt_for_search = rt.handle().clone();
-    ui.on_search_changed(move |text| {
-        let ui = ui_weak.unwrap();
+    ui.on_search_changed(move |text: slint::SharedString| {
+        let ui_for_task = ui_weak.clone();
         let query = text.to_string();
-        if let Ok(ipc::IpcResponse::History(items)) = rt_for_search.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
-            refresh_ui_items_from_history(&ui, &items, &query);
-        }
+
+        tokio::spawn(async move {
+            if let Ok(ipc::IpcResponse::History(items)) = ipc::send_command(ipc::IpcCommand::GetHistory { query: Some(query) }).await {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_for_task.upgrade() {
+                        GuiManager::refresh_ui_from_history(&ui, items, "");
+                    }
+                });
+            }
+        });
     });
 
     // --- Callback: paste item ---
     let ui_weak = ui.as_weak();
-    let rt_for_paste = rt.handle().clone();
     ui.on_paste_item(move |id| {
         info!("Paste item id={}", id);
         let ui = ui_weak.unwrap();
-        ui.hide().unwrap();
-        let _ = rt_for_paste.block_on(ipc::send_command(ipc::IpcCommand::SelectItem { id: id as i64 }));
+        let _ = ui.hide();
+        tokio::spawn(async move {
+            let _ = ipc::send_command(ipc::IpcCommand::SelectItem { id: id as i64 }).await;
+        });
     });
 
     // --- Callback: delete item ---
     let ui_weak = ui.as_weak();
-    let rt_for_delete = rt.handle().clone();
     ui.on_delete_item(move |id| {
         info!("Delete item id={}", id);
-        let ui = ui_weak.unwrap();
-        if let Ok(ipc::IpcResponse::History(items)) = rt_for_delete.block_on(ipc::send_command(ipc::IpcCommand::DeleteItem { id: id as i64 })) {
-            refresh_ui_items_from_history(&ui, &items, &ui.get_search_text().to_string());
-        }
+        let ui_for_task = ui_weak.clone();
+        tokio::spawn(async move {
+            if let Ok(ipc::IpcResponse::History(items)) = ipc::send_command(ipc::IpcCommand::DeleteItem { id: id as i64 }).await {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_for_task.upgrade() {
+                        GuiManager::refresh_ui_from_history(&ui, items, &ui.get_search_text());
+                    }
+                });
+            }
+        });
     });
 
     // --- Callback: toggle pin ---
     let ui_weak = ui.as_weak();
-    let rt_for_pin = rt.handle().clone();
     ui.on_toggle_pin(move |id| {
         info!("Toggle pin id={}", id);
-        let ui = ui_weak.unwrap();
-        if let Ok(ipc::IpcResponse::History(items)) = rt_for_pin.block_on(ipc::send_command(ipc::IpcCommand::TogglePin { id: id as i64 })) {
-            refresh_ui_items_from_history(&ui, &items, &ui.get_search_text().to_string());
-        }
+        let ui_for_task = ui_weak.clone();
+        tokio::spawn(async move {
+            if let Ok(ipc::IpcResponse::History(items)) = ipc::send_command(ipc::IpcCommand::TogglePin { id: id as i64 }).await {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_for_task.upgrade() {
+                        GuiManager::refresh_ui_from_history(&ui, items, &ui.get_search_text());
+                    }
+                });
+            }
+        });
     });
 
     // --- Callback: close ---
     let ui_weak = ui.as_weak();
     ui.on_request_close(move || {
         let ui = ui_weak.unwrap();
-        ui.hide().unwrap();
+        let _ = ui.hide();
     });
 
     ui.run().unwrap();
-}
-
-/// Refresh UI из списка ClipboardItem
-fn refresh_ui_items_from_history(ui: &MaccyMenu, items: &[database::ClipboardItem], query: &str) {
-    let filtered: Vec<&database::ClipboardItem> = if query.is_empty() {
-        items.iter().collect()
-    } else {
-        let matcher = SkimMatcherV2::default();
-        let mut scored: Vec<_> = items
-            .iter()
-            .filter_map(|item| {
-                let search_text = match &item.value_text {
-                    Some(text) => text,
-                    None => "Изображение",
-                };
-                matcher.fuzzy_match(search_text, query).map(|score| (item, score))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
-        scored.into_iter().map(|(item, _)| item).collect()
-    };
-
-    let entries: Vec<ClipboardEntry> = filtered
-        .iter()
-        .map(|item| {
-            let display_text = match &item.value_text {
-                Some(text) if text.len() > 100 => format!("{}…", &text[..100]),
-                Some(text) => text.clone(),
-                None => "📷 Изображение".to_string(),
-            };
-            ClipboardEntry {
-                id: item.id as i32,
-                text: SharedString::from(display_text),
-                is_pinned: item.is_pinned,
-                shortcut_index: 0, // assigned by Slint via index
-            }
-        })
-        .collect();
-
-    let model = Rc::new(VecModel::from(entries));
-    ui.set_items(ModelRc::from(model));
-    ui.set_current_index(0);
-}
-
-/// Refresh the item list in the UI, applying optional fuzzy search filter
-fn refresh_ui_items(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
-    let items = match db.get_history() {
-        Ok(items) => items,
-        Err(e) => {
-            error!("Failed to get history: {}", e);
-            return;
-        }
-    };
-
-    let filtered: Vec<&database::ClipboardItem> = if query.is_empty() {
-        items.iter().collect()
-    } else {
-        let matcher = SkimMatcherV2::default();
-        let mut scored: Vec<_> = items
-            .iter()
-            .filter_map(|item| {
-                let search_text = match &item.value_text {
-                    Some(text) => text,
-                    None => "Изображение",
-                };
-                matcher.fuzzy_match(search_text, query).map(|score| (item, score))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
-        scored.into_iter().map(|(item, _)| item).collect()
-    };
-
-    let entries: Vec<ClipboardEntry> = filtered
-        .iter()
-        .map(|item| {
-            let display_text = match &item.value_text {
-                Some(text) if text.len() > 100 => format!("{}…", &text[..100]),
-                Some(text) => text.clone(),
-                None => "📷 Изображение".to_string(),
-            };
-            ClipboardEntry {
-                id: item.id as i32,
-                text: SharedString::from(display_text),
-                is_pinned: item.is_pinned,
-                shortcut_index: 0, // assigned by Slint via index
-            }
-        })
-        .collect();
-
-    let model = Rc::new(VecModel::from(entries));
-    ui.set_items(ModelRc::from(model));
-    ui.set_current_index(0);
 }

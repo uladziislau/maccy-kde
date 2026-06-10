@@ -26,10 +26,14 @@ info_plist_extra = {
     NSRequiresAquaSystemAppearance = false
 }
 
+[lib]
+name = "maccy_kde"
+path = "src/lib.rs"
+
 [dependencies]
 rusqlite = { version = "0.30.0", features = ["bundled"] }
 tokio = { version = "1.35", features = ["rt-multi-thread", "time", "macros", "net", "io-util"] }
-enigo = "0.2.1"
+enigo = { version = "0.2.1" }
 slint = "1.16.1"
 fuzzy-matcher = "0.3.7"
 chrono = "0.4.31"
@@ -41,6 +45,8 @@ serde_json = "1.0"
 image = "0.25.0"
 uuid = { version = "1.0", features = ["v4"] }
 tempfile = "3.0"
+fs2 = "0.4.3"
+lazy_static = "1.4.0"
 
 [build-dependencies]
 slint-build = "1.16.1"

@@ -32,6 +32,9 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
                         error!("Failed to add text item to DB: {}", e);
                     } else {
                         info!("Copied new text item to DB: {:.20}...", trimmed);
+                        slint::invoke_from_event_loop(|| {
+                            crate::refresh_ui();
+                        }).unwrap();
                     }
                 }
             }
@@ -65,7 +68,6 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
 #[cfg(target_os = "linux")]
 pub async fn start_clipboard_monitor(db: Arc<Database>) {
     use wayland_clipboard_listener::{WlClipboardPasteStream, WlListenType};
-    use image::RgbaImage;
 
     info!("Starting Wayland clipboard monitor (event-driven)");
 
@@ -78,31 +80,42 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
             }
         };
 
-        for context in stream.paste_stream().flatten().flatten() {
+        for message in stream.paste_stream().flatten() {
+            let content = message.context.context;
+            let mime_type = message.context.mime_type;
+
             // Проверяем, текст ли это
-            if let Ok(text) = String::from_utf8(context.to_vec()) {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    if let Err(e) = db.add_text_item(trimmed) {
-                        error!("Failed to add text item to DB: {}", e);
-                    } else {
-                        info!("Copied new text item to DB: {:.20}...", trimmed);
+            if mime_type.starts_with("text/") {
+                if let Ok(text) = String::from_utf8(content.to_vec()) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        if let Err(e) = db.add_text_item(trimmed) {
+                            error!("Failed to add text item to DB: {}", e);
+                        } else {
+                            info!("Copied new text item to DB: {:.20}...", trimmed);
+                        slint::invoke_from_event_loop(|| {
+                            crate::refresh_ui();
+                        }).unwrap();
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
 
-            // TODO: Обработка изображений на Wayland требует дополнительной работы
-            // (Wayland clipboard protocols для изображений сложнее)
+            // Обработка изображений
+            if mime_type.starts_with("image/") {
+                if let Ok(img) = image::load_from_memory(&content) {
+                    if let Err(e) = db.add_image_item(&img.to_rgba8(), &mime_type) {
+                        error!("Failed to add image item to DB: {}", e);
+                    } else {
+                        info!("Copied new image item to DB (type: {})", mime_type);
+                        slint::invoke_from_event_loop(|| {
+                            crate::refresh_ui();
+                        }).unwrap();
+                    }
+                }
+            }
         }
     });
 }
 
-/// Простой хэш для сравнения изображений (чтобы не дублировать)
-fn compute_image_hash(bytes: &[u8]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
-}

@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use chrono::Utc;
 use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use image::RgbaImage;
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -156,29 +155,56 @@ impl Database {
     /// Добавляет изображение в историю
     pub fn add_image_item(&self, image: &RgbaImage, mime_type: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
+
+        // Вычисляем хэш изображения для дедупликации
+        let hash = self.compute_image_hash(image);
+        let filename = format!("{}.png", hash);
+        let cache_path = Self::get_cache_path();
+        let image_path = cache_path.join(&filename);
+
         let conn = self.conn.lock().unwrap();
 
-        // Сохраняем изображение в кэш
-        let cache_path = Self::get_cache_path();
-        fs::create_dir_all(&cache_path).map_err(|e| rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
-            Some(format!("Failed to create cache directory: {}", e)),
-        ))?;
-        let filename = format!("{}.png", Uuid::new_v4());
-        let image_path = cache_path.join(&filename);
-        image.save(&image_path).map_err(|e| rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
-            Some(format!("Failed to save image: {}", e)),
-        ))?;
+        // Проверяем, есть ли уже такое изображение в БД
+        let mut stmt = conn.prepare("SELECT id FROM clipboard_items WHERE image_path LIKE ?1 AND data_type = 'Image'")?;
+        let existing_id: Option<i64> = stmt.query_row(params![format!("%{}", filename)], |row| row.get(0)).optional()?;
+        drop(stmt);
 
-        // Добавляем запись в БД
-        conn.execute(
-            "INSERT INTO clipboard_items (image_path, data_type, raw_mime_type, last_used_at) VALUES (?1, 'Image', ?2, ?3)",
-            params![image_path.to_str(), mime_type, now],
-        )?;
+        if let Some(id) = existing_id {
+            // Обновляем время использования
+            conn.execute(
+                "UPDATE clipboard_items SET last_used_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+        } else {
+            // Сохраняем изображение в кэш, если файла еще нет
+            if !image_path.exists() {
+                fs::create_dir_all(&cache_path).map_err(|e| rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                    Some(format!("Failed to create cache directory: {}", e)),
+                ))?;
+                image.save(&image_path).map_err(|e| rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                    Some(format!("Failed to save image: {}", e)),
+                ))?;
+            }
+
+            // Добавляем запись в БД
+            conn.execute(
+                "INSERT INTO clipboard_items (image_path, data_type, raw_mime_type, last_used_at) VALUES (?1, 'Image', ?2, ?3)",
+                params![image_path.to_str(), mime_type, now],
+            )?;
+        }
 
         self.rotate_history_locked(&conn)?;
         Ok(())
+    }
+
+    fn compute_image_hash(&self, image: &RgbaImage) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        image.as_raw().hash(&mut hasher);
+        format!("{:x}", hasher.finish())
     }
 
     fn rotate_history_locked(&self, conn: &Connection) -> Result<()> {
@@ -341,5 +367,20 @@ mod tests {
         let history = db.get_history().unwrap();
         assert_eq!(history.len(), 1);
         assert!(matches!(history[0].data_type, DataType::Image));
+    }
+
+    #[test]
+    fn test_image_deduplication() {
+        let db = Database::in_memory().unwrap();
+        let img = RgbaImage::from_fn(10, 10, |_, _| Rgba([255, 255, 255, 255]));
+
+        db.add_image_item(&img, "image/png").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        db.add_image_item(&img, "image/png").unwrap();
+
+        let history = db.get_history().unwrap();
+        // Должна быть только одна запись с обновленным временем (хотя в текущей реализации add_image_item
+        // если запись найдена, она просто обновляет last_used_at, не добавляя новую)
+        assert_eq!(history.len(), 1);
     }
 }
