@@ -72,11 +72,13 @@ component ClipItem inherits Rectangle {
 // --- Main popup component ---
 export component MaccyMenu inherits Window {
     title: "Maccy KDE";
+    no-frame: true;
+    always-on-top: true;
     // Compact size like Maccy
     width: 340px;
     min-height: 100px;
     preferred-height: 420px;
-    background: #1e1e2eee;
+    background: #1e1e2ecc;
 
     // --- Properties ---
     in property <[ClipboardEntry]> items: [];

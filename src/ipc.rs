@@ -1,4 +1,5 @@
 use crate::database::{ClipboardItem, Database, DataType};
+use fuzzy_matcher::FuzzyMatcher;
 use log::{info, error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -7,10 +8,11 @@ use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum IpcCommand {
-    GetHistory,
+    GetHistory { query: Option<String> },
     SelectItem { id: i64 },
     TogglePin { id: i64 },
     DeleteItem { id: i64 },
+    ShowPopup,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -87,8 +89,32 @@ async fn handle_client(stream: UnixStream, db: Arc<Database>) {
 
 async fn handle_command(cmd: IpcCommand, db: Arc<Database>) -> IpcResponse {
     match cmd {
-        IpcCommand::GetHistory => match db.get_history() {
-            Ok(items) => IpcResponse::History(items),
+        IpcCommand::ShowPopup => {
+            slint::invoke_from_event_loop(|| {
+                crate::show_ui();
+            }).unwrap();
+            IpcResponse::Success
+        }
+        IpcCommand::GetHistory { query } => match db.get_history() {
+            Ok(items) => {
+                if let Some(q) = query {
+                    let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+                    let mut scored: Vec<_> = items
+                        .into_iter()
+                        .filter_map(|item| {
+                            let search_text = match &item.value_text {
+                                Some(text) => text,
+                                None => "Изображение",
+                            };
+                            matcher.fuzzy_match(search_text, &q).map(|score| (item, score))
+                        })
+                        .collect();
+                    scored.sort_by(|a, b| b.1.cmp(&a.1));
+                    IpcResponse::History(scored.into_iter().map(|(item, _)| item).collect())
+                } else {
+                    IpcResponse::History(items)
+                }
+            },
             Err(e) => IpcResponse::Error(format!("Failed to get history: {}", e)),
         },
         IpcCommand::SelectItem { id } => {
@@ -180,7 +206,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         // Тестируем отправку команды
-        let result = send_command(IpcCommand::GetHistory).await;
+        let result = send_command(IpcCommand::GetHistory { query: None }).await;
         assert!(result.is_ok());
 
         if let Ok(IpcResponse::History(items)) = result {

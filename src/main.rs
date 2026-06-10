@@ -4,6 +4,8 @@ mod paster;
 mod ipc;
 mod autostart;
 
+use fs2::FileExt;
+use std::fs::File;
 use clap::Parser;
 use database::Database;
 use log::{info, error};
@@ -14,6 +16,17 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 slint::include_modules!();
+
+use std::sync::Mutex;
+
+struct GlobalState {
+    ui: Option<slint::Weak<MaccyMenu>>,
+    db: Arc<Database>,
+}
+
+lazy_static::lazy_static! {
+    static ref STATE: Mutex<Option<GlobalState>> = Mutex::new(None);
+}
 
 /// Легковесный менеджер буфера обмена для KDE Plasma 6 (Wayland)
 #[derive(Parser, Debug)]
@@ -39,6 +52,22 @@ struct Args {
 fn main() {
     env_logger::init();
     let args = Args::parse();
+
+    let _lock_file = if args.daemon || (!args.daemon && !args.popup) {
+        let lock_path = std::env::temp_dir().join("maccy-kde.lock");
+        let file = File::create(&lock_path).expect("Failed to create lock file");
+        if file.try_lock_exclusive().is_err() {
+            if args.daemon {
+                eprintln!("Daemon is already running.");
+                std::process::exit(1);
+            }
+            None
+        } else {
+            Some(file)
+        }
+    } else {
+        None
+    };
 
     if args.install_autostart {
         match autostart::install_autostart() {
@@ -69,9 +98,51 @@ fn main() {
     }
 
     if args.popup {
-        info!("Starting maccy-kde popup...");
-        run_popup();
+        info!("Requesting popup from daemon...");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match rt.block_on(ipc::send_command(ipc::IpcCommand::ShowPopup)) {
+            Ok(_) => {
+                info!("Popup requested successfully");
+                return;
+            },
+            Err(e) => {
+                error!("Failed to request popup: {}", e);
+                info!("Starting popup in standalone mode...");
+                run_popup();
+                return;
+            }
+        }
     }
+}
+
+async fn register_global_shortcut() -> Result<(), Box<dyn std::error::Error>> {
+    info!("Global shortcut registration (placeholder) - currently rely on KDE shortcut to 'maccy-kde --popup'");
+    Ok(())
+}
+
+pub fn show_ui() {
+    let mut state_lock = STATE.lock().unwrap();
+    if let Some(state) = state_lock.as_mut() {
+        if let Some(ui_weak) = &state.ui {
+            if let Some(ui) = ui_weak.upgrade() {
+                // Apply blur effect (KDE/Wayland specific)
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = apply_blur_effect(&ui);
+                }
+
+                ui.show().unwrap();
+                refresh_ui_items(&ui, &state.db, "");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_blur_effect(_ui: &MaccyMenu) -> Result<(), Box<dyn std::error::Error>> {
+    // In Slint with Wayland/KDE, we usually set a property or use DBus
+    // For now, this is a placeholder for the DBus call mentioned in doc 04
+    Ok(())
 }
 
 /// Для разработки: запускаем всё в одном процессе
@@ -177,7 +248,14 @@ fn run_all_in_one() {
     let ui_weak = ui.as_weak();
     ui.on_request_close(move || {
         let ui = ui_weak.unwrap();
-        ui.hide().unwrap();
+        let _ = ui.hide();
+    });
+
+    let ui_weak = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        let ui = ui_weak.unwrap();
+        let _ = ui.hide();
+        slint::CloseRequestResponse::KeepWindowShown
     });
 
     // Run the Slint event loop
@@ -186,26 +264,139 @@ fn run_all_in_one() {
 
 /// Запустить демон
 fn run_daemon() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let db = match Database::new() {
-            Ok(db) => Arc::new(db),
-            Err(e) => {
-                error!("Failed to initialize database: {}", e);
+    let db = match Database::new() {
+        Ok(db) => Arc::new(db),
+        Err(e) => {
+            error!("Failed to initialize database: {}", e);
+            return;
+        }
+    };
+
+    let ui = MaccyMenu::new().unwrap();
+    setup_ui_callbacks(&ui, &db);
+
+    {
+        let mut state_lock = STATE.lock().unwrap();
+        *state_lock = Some(GlobalState {
+            ui: Some(ui.as_weak()),
+            db: db.clone(),
+        });
+    }
+
+    // Register global shortcut via DBus (KDE kglobalaccel)
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            if let Err(e) = register_global_shortcut().await {
+                error!("Failed to register global shortcut: {}", e);
+            }
+        });
+    });
+
+    // Start background threads
+    let db_monitor = db.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::spawn(async move {
+                clipboard::start_clipboard_monitor(db_monitor).await;
+            });
+
+            if let Err(e) = ipc::start_ipc_server(db).await {
+                error!("Failed to start IPC server: {}", e);
+            }
+        });
+    });
+
+    info!("Daemon running with UI prepared.");
+    // slint::set_quit_on_last_window_closed(false); // Only in newer Slint or different API
+    ui.run().unwrap();
+}
+
+fn setup_ui_callbacks(ui: &MaccyMenu, db: &Arc<Database>) {
+    // Initial data
+    refresh_ui_items(ui, db, "");
+
+    // --- Callback: search changed ---
+    let ui_weak = ui.as_weak();
+    let db_search = db.clone();
+    ui.on_search_changed(move |text| {
+        let ui = ui_weak.unwrap();
+        let query = text.to_string();
+        refresh_ui_items(&ui, &db_search, &query);
+    });
+
+    // --- Callback: paste item ---
+    let ui_weak = ui.as_weak();
+    let db_paste = db.clone();
+    ui.on_paste_item(move |id| {
+        info!("Paste item id={}", id);
+        if let Ok(history) = db_paste.get_history() {
+            if let Some(item) = history.iter().find(|i| i.id == id as i64) {
+                match item.data_type {
+                    crate::database::DataType::Text => {
+                        if let Some(text) = &item.value_text {
+                            let _ = db_paste.add_text_item(text);
+                            let ui = ui_weak.unwrap();
+                            ui.hide().unwrap();
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            paster::paste_text(text);
+                        }
+                    },
+                    crate::database::DataType::Image => {
+                        if let Some(path) = &item.image_path {
+                            let ui = ui_weak.unwrap();
+                            let _ = ui.hide();
+                            info!("Pasting image from: {:?}", path);
+                            paster::paste_image(path);
+                        }
+                    }
+                }
                 return;
             }
-        };
-
-        // Start background clipboard monitor
-        let db_monitor = db.clone();
-        tokio::spawn(async {
-            clipboard::start_clipboard_monitor(db_monitor).await;
-        });
-
-        // Start IPC server
-        if let Err(e) = ipc::start_ipc_server(db).await {
-            error!("Failed to start IPC server: {}", e);
         }
+        let ui = ui_weak.unwrap();
+        ui.hide().unwrap();
+    });
+
+    // --- Callback: delete item ---
+    let ui_weak = ui.as_weak();
+    let db_del = db.clone();
+    ui.on_delete_item(move |id| {
+        info!("Delete item id={}", id);
+        let _ = db_del.delete_item(id as i64);
+        let ui = ui_weak.unwrap();
+        refresh_ui_items(&ui, &db_del, &ui.get_search_text().to_string());
+    });
+
+    // --- Callback: toggle pin ---
+    let ui_weak = ui.as_weak();
+    let db_pin = db.clone();
+    ui.on_toggle_pin(move |id| {
+        info!("Toggle pin id={}", id);
+        let _ = db_pin.toggle_pin(id as i64);
+        let ui = ui_weak.unwrap();
+        refresh_ui_items(&ui, &db_pin, &ui.get_search_text().to_string());
+    });
+
+    // --- Callback: close ---
+    let ui_weak = ui.as_weak();
+    ui.on_request_close(move || {
+        let ui = ui_weak.unwrap();
+        let _ = ui.hide();
+    });
+
+    let ui_weak = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        let ui = ui_weak.unwrap();
+        let _ = ui.hide();
+        slint::CloseRequestResponse::KeepWindowShown
     });
 }
 
@@ -215,7 +406,7 @@ fn run_popup() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     // Сначала попробуем подключиться к демону
-    match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
+    match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory { query: None })) {
         Ok(_) => {
             // Если демон запущен, работаем через IPC
             run_popup_with_ipc(rt);
@@ -233,7 +424,7 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     let ui = MaccyMenu::new().unwrap();
 
     // Загрузить начальный список
-    let initial_history = match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
+    let initial_history = match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory { query: None })) {
         Ok(ipc::IpcResponse::History(items)) => items,
         _ => vec![]
     };
@@ -245,8 +436,8 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     ui.on_search_changed(move |text| {
         let ui = ui_weak.unwrap();
         let query = text.to_string();
-        if let Ok(ipc::IpcResponse::History(items)) = rt_for_search.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
-            refresh_ui_items_from_history(&ui, &items, &query);
+        if let Ok(ipc::IpcResponse::History(items)) = rt_for_search.block_on(ipc::send_command(ipc::IpcCommand::GetHistory { query: Some(query.clone()) })) {
+            refresh_ui_items_from_history(&ui, &items, ""); // items are already filtered
         }
     });
 
