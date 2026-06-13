@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-use log::{info, error};
+use log::info;
 
 const DESKTOP_FILE_CONTENT: &str = r#"[Desktop Entry]
 Type=Application

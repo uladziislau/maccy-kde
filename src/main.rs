@@ -91,7 +91,7 @@ fn run_all_in_one() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .expect("Failed to create Tokio runtime");
         rt.block_on(async {
             clipboard::start_clipboard_monitor(db_monitor).await;
             // Keep the runtime alive
@@ -102,7 +102,7 @@ fn run_all_in_one() {
     });
 
     // Create the Slint UI
-    let ui = MaccyMenu::new().unwrap();
+    let ui = MaccyMenu::new().expect("Failed to create Slint UI");
 
     // Load initial history
     let db_ui = db.clone();
@@ -112,7 +112,7 @@ fn run_all_in_one() {
     let ui_weak = ui.as_weak();
     let db_search = db.clone();
     ui.on_search_changed(move |text| {
-        let ui = ui_weak.unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
         let query = text.to_string();
         refresh_ui_items(&ui, &db_search, &query);
     });
@@ -131,8 +131,10 @@ fn run_all_in_one() {
                         if let Some(text) = &item.value_text {
                             let _ = db_paste.add_text_item(text);
                             // Close window first, then paste into the focused app
-                            let ui = ui_weak.unwrap();
-                            ui.hide().unwrap();
+                            let ui = ui_weak.upgrade().expect("UI was dropped");
+                            if let Err(e) = ui.hide() {
+                                error!("Failed to hide UI: {:?}", e);
+                            }
                             std::thread::sleep(std::time::Duration::from_millis(100));
                             paster::paste_text(text);
                         }
@@ -140,8 +142,10 @@ fn run_all_in_one() {
                     crate::database::DataType::Image => {
                         // TODO: Обработка вставки изображений
                         if let Some(path) = &item.image_path {
-                            let ui = ui_weak.unwrap();
-                            ui.hide().unwrap();
+                            let ui = ui_weak.upgrade().expect("UI was dropped");
+                            if let Err(e) = ui.hide() {
+                                error!("Failed to hide UI: {:?}", e);
+                            }
                             info!("Pasting image from: {:?}", path);
                         }
                     }
@@ -149,8 +153,10 @@ fn run_all_in_one() {
                 return;
             }
         }
-        let ui = ui_weak.unwrap();
-        ui.hide().unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
+        if let Err(e) = ui.hide() {
+            error!("Failed to hide UI: {:?}", e);
+        }
     });
 
     // --- Callback: delete item ---
@@ -159,7 +165,7 @@ fn run_all_in_one() {
     ui.on_delete_item(move |id| {
         info!("Delete item id={}", id);
         let _ = db_del.delete_item(id as i64);
-        let ui = ui_weak.unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
         refresh_ui_items(&ui, &db_del, &ui.get_search_text().to_string());
     });
 
@@ -169,24 +175,26 @@ fn run_all_in_one() {
     ui.on_toggle_pin(move |id| {
         info!("Toggle pin id={}", id);
         let _ = db_pin.toggle_pin(id as i64);
-        let ui = ui_weak.unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
         refresh_ui_items(&ui, &db_pin, &ui.get_search_text().to_string());
     });
 
     // --- Callback: close ---
     let ui_weak = ui.as_weak();
     ui.on_request_close(move || {
-        let ui = ui_weak.unwrap();
-        ui.hide().unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
+        if let Err(e) = ui.hide() {
+            error!("Failed to hide UI: {:?}", e);
+        }
     });
 
     // Run the Slint event loop
-    ui.run().unwrap();
+    ui.run().expect("Failed to run Slint event loop");
 }
 
 /// Запустить демон
 fn run_daemon() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime for daemon");
     rt.block_on(async {
         let db = match Database::new() {
             Ok(db) => Arc::new(db),
@@ -212,7 +220,7 @@ fn run_daemon() {
 /// Запустить popup
 fn run_popup() {
     info!("Popup started, connecting to daemon...");
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime for popup");
 
     // Сначала попробуем подключиться к демону
     match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
@@ -230,7 +238,7 @@ fn run_popup() {
 
 /// Запустить popup с подключением к демону через IPC
 fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
-    let ui = MaccyMenu::new().unwrap();
+    let ui = MaccyMenu::new().expect("Failed to create Slint UI for popup");
 
     // Загрузить начальный список
     let initial_history = match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
@@ -243,7 +251,7 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     let ui_weak = ui.as_weak();
     let rt_for_search = rt.handle().clone();
     ui.on_search_changed(move |text| {
-        let ui = ui_weak.unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
         let query = text.to_string();
         if let Ok(ipc::IpcResponse::History(items)) = rt_for_search.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
             refresh_ui_items_from_history(&ui, &items, &query);
@@ -255,8 +263,10 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     let rt_for_paste = rt.handle().clone();
     ui.on_paste_item(move |id| {
         info!("Paste item id={}", id);
-        let ui = ui_weak.unwrap();
-        ui.hide().unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
+        if let Err(e) = ui.hide() {
+            error!("Failed to hide UI: {:?}", e);
+        }
         let _ = rt_for_paste.block_on(ipc::send_command(ipc::IpcCommand::SelectItem { id: id as i64 }));
     });
 
@@ -265,7 +275,7 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     let rt_for_delete = rt.handle().clone();
     ui.on_delete_item(move |id| {
         info!("Delete item id={}", id);
-        let ui = ui_weak.unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
         if let Ok(ipc::IpcResponse::History(items)) = rt_for_delete.block_on(ipc::send_command(ipc::IpcCommand::DeleteItem { id: id as i64 })) {
             refresh_ui_items_from_history(&ui, &items, &ui.get_search_text().to_string());
         }
@@ -276,7 +286,7 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     let rt_for_pin = rt.handle().clone();
     ui.on_toggle_pin(move |id| {
         info!("Toggle pin id={}", id);
-        let ui = ui_weak.unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
         if let Ok(ipc::IpcResponse::History(items)) = rt_for_pin.block_on(ipc::send_command(ipc::IpcCommand::TogglePin { id: id as i64 })) {
             refresh_ui_items_from_history(&ui, &items, &ui.get_search_text().to_string());
         }
@@ -285,38 +295,27 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     // --- Callback: close ---
     let ui_weak = ui.as_weak();
     ui.on_request_close(move || {
-        let ui = ui_weak.unwrap();
-        ui.hide().unwrap();
+        let ui = ui_weak.upgrade().expect("UI was dropped");
+        if let Err(e) = ui.hide() {
+            error!("Failed to hide UI: {:?}", e);
+        }
     });
 
-    ui.run().unwrap();
+    ui.run().expect("Failed to run Slint event loop");
 }
 
 /// Refresh UI из списка ClipboardItem
 fn refresh_ui_items_from_history(ui: &MaccyMenu, items: &[database::ClipboardItem], query: &str) {
-    let filtered: Vec<&database::ClipboardItem> = if query.is_empty() {
-        items.iter().collect()
-    } else {
-        let matcher = SkimMatcherV2::default();
-        let mut scored: Vec<_> = items
-            .iter()
-            .filter_map(|item| {
-                let search_text = match &item.value_text {
-                    Some(text) => text,
-                    None => "Изображение",
-                };
-                matcher.fuzzy_match(search_text, query).map(|score| (item, score))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
-        scored.into_iter().map(|(item, _)| item).collect()
-    };
+    let filtered = filter_items_fuzzy(items, query);
 
     let entries: Vec<ClipboardEntry> = filtered
         .iter()
         .map(|item| {
             let display_text = match &item.value_text {
-                Some(text) if text.len() > 100 => format!("{}…", &text[..100]),
+                Some(text) if text.chars().count() > 100 => {
+                    let truncated: String = text.chars().take(100).collect();
+                    format!("{}…", truncated)
+                },
                 Some(text) => text.clone(),
                 None => "📷 Изображение".to_string(),
             };
@@ -334,6 +333,149 @@ fn refresh_ui_items_from_history(ui: &MaccyMenu, items: &[database::ClipboardIte
     ui.set_current_index(0);
 }
 
+#[cfg(test)]
+mod fuzzy_search_tests {
+    use super::*;
+    use crate::database::{ClipboardItem, DataType};
+
+    fn create_test_item(id: i64, text: &str) -> ClipboardItem {
+        ClipboardItem {
+            id,
+            value_text: Some(text.to_string()),
+            image_path: None,
+            data_type: DataType::Text,
+            raw_mime_type: "text/plain".to_string(),
+            is_pinned: false,
+            pin_order: 0,
+            last_used_at: chrono::Utc::now().timestamp(),
+        }
+    }
+
+    #[test]
+    fn test_filter_items_fuzzy_empty_query() {
+        let items = vec![
+            create_test_item(1, "Hello World"),
+            create_test_item(2, "Test Item"),
+        ];
+        
+        let filtered = filter_items_fuzzy(&items, "");
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_items_fuzzy_exact_match() {
+        let items = vec![
+            create_test_item(1, "Hello World"),
+            create_test_item(2, "Test Item"),
+        ];
+        
+        let filtered = filter_items_fuzzy(&items, "Hello");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].value_text, Some("Hello World".to_string()));
+    }
+
+    #[test]
+    fn test_filter_items_fuzzy_partial_match() {
+        let items = vec![
+            create_test_item(1, "Hello World"),
+            create_test_item(2, "Hello There"),
+            create_test_item(3, "Test Item"),
+        ];
+        
+        let filtered = filter_items_fuzzy(&items, "He");
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_items_fuzzy_no_match() {
+        let items = vec![
+            create_test_item(1, "Hello World"),
+            create_test_item(2, "Test Item"),
+        ];
+        
+        let filtered = filter_items_fuzzy(&items, "xyz");
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn test_filter_items_fuzzy_cyrillic() {
+        let items = vec![
+            create_test_item(1, "Привет мир"),
+            create_test_item(2, "Тестовый элемент"),
+        ];
+        
+        let filtered = filter_items_fuzzy(&items, "Прив");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].value_text, Some("Привет мир".to_string()));
+    }
+
+    #[test]
+    fn test_filter_items_fuzzy_emoji() {
+        let items = vec![
+            create_test_item(1, "Hello 🌍"),
+            create_test_item(2, "Test 🚀"),
+        ];
+        
+        let filtered = filter_items_fuzzy(&items, "🌍");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].value_text, Some("Hello 🌍".to_string()));
+    }
+
+    #[test]
+    fn test_filter_items_fuzzy_image_item() {
+        let items = vec![
+            ClipboardItem {
+                id: 1,
+                value_text: None,
+                image_path: Some(std::path::PathBuf::from("/path/to/image.png")),
+                data_type: DataType::Image,
+                raw_mime_type: "image/png".to_string(),
+                is_pinned: false,
+                pin_order: 0,
+                last_used_at: chrono::Utc::now().timestamp(),
+            },
+            create_test_item(2, "Test Item"),
+        ];
+        
+        let filtered = filter_items_fuzzy(&items, "Изображение");
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].value_text.is_none());
+    }
+
+    #[test]
+    fn test_filter_items_fuzzy_case_sensitivity() {
+        let items = vec![
+            create_test_item(1, "Hello World"),
+            create_test_item(2, "HELLO THERE"),
+        ];
+        
+        let filtered = filter_items_fuzzy(&items, "hello");
+        // fuzzy-matcher is case-insensitive by default
+        assert!(filtered.len() >= 1);
+    }
+}
+
+/// Filter clipboard items using fuzzy search
+pub fn filter_items_fuzzy<'a>(items: &'a [database::ClipboardItem], query: &str) -> Vec<&'a database::ClipboardItem> {
+    if query.is_empty() {
+        return items.iter().collect();
+    }
+
+    let matcher = SkimMatcherV2::default();
+    let mut scored: Vec<_> = items
+        .iter()
+        .filter_map(|item| {
+            let search_text = match &item.value_text {
+                Some(text) => text,
+                None => "Изображение",
+            };
+            matcher.fuzzy_match(search_text, query).map(|score| (item, score))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.into_iter().map(|(item, _)| item).collect()
+}
+
 /// Refresh the item list in the UI, applying optional fuzzy search filter
 fn refresh_ui_items(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
     let items = match db.get_history() {
@@ -344,29 +486,16 @@ fn refresh_ui_items(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
         }
     };
 
-    let filtered: Vec<&database::ClipboardItem> = if query.is_empty() {
-        items.iter().collect()
-    } else {
-        let matcher = SkimMatcherV2::default();
-        let mut scored: Vec<_> = items
-            .iter()
-            .filter_map(|item| {
-                let search_text = match &item.value_text {
-                    Some(text) => text,
-                    None => "Изображение",
-                };
-                matcher.fuzzy_match(search_text, query).map(|score| (item, score))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
-        scored.into_iter().map(|(item, _)| item).collect()
-    };
+    let filtered = filter_items_fuzzy(&items, query);
 
     let entries: Vec<ClipboardEntry> = filtered
         .iter()
         .map(|item| {
             let display_text = match &item.value_text {
-                Some(text) if text.len() > 100 => format!("{}…", &text[..100]),
+                Some(text) if text.chars().count() > 100 => {
+                    let truncated: String = text.chars().take(100).collect();
+                    format!("{}…", truncated)
+                },
                 Some(text) => text.clone(),
                 None => "📷 Изображение".to_string(),
             };

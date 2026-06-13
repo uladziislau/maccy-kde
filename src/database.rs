@@ -128,7 +128,10 @@ impl Database {
     /// Добавляет текстовый элемент в историю
     pub fn add_text_item(&self, text: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some(format!("Mutex poisoned: {}", e)),
+        ))?;
 
         // Проверяем, есть ли уже такой текст
         let mut stmt = conn.prepare("SELECT id FROM clipboard_items WHERE value_text = ?1 AND data_type = 'Text'")?;
@@ -156,7 +159,10 @@ impl Database {
     /// Добавляет изображение в историю
     pub fn add_image_item(&self, image: &RgbaImage, mime_type: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some(format!("Mutex poisoned: {}", e)),
+        ))?;
 
         // Сохраняем изображение в кэш
         let cache_path = Self::get_cache_path();
@@ -215,7 +221,10 @@ impl Database {
     }
 
     pub fn get_history(&self) -> Result<Vec<ClipboardItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some(format!("Mutex poisoned: {}", e)),
+        ))?;
         let mut stmt = conn.prepare(
             "SELECT id, value_text, image_path, data_type, raw_mime_type, is_pinned, pin_order, last_used_at 
              FROM clipboard_items 
@@ -247,7 +256,10 @@ impl Database {
     }
 
     pub fn toggle_pin(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some(format!("Mutex poisoned: {}", e)),
+        ))?;
         let mut stmt = conn.prepare("SELECT is_pinned FROM clipboard_items WHERE id = ?1")?;
         let is_pinned: i32 = stmt.query_row(params![id], |row| row.get(0))?;
         drop(stmt);
@@ -261,7 +273,10 @@ impl Database {
     }
 
     pub fn delete_item(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some(format!("Mutex poisoned: {}", e)),
+        ))?;
         // Сначала получаем путь к изображению
         let mut stmt = conn.prepare("SELECT image_path FROM clipboard_items WHERE id = ?1")?;
         let image_path_str: Option<String> = stmt.query_row(params![id], |row| row.get(0)).optional()?;
@@ -310,6 +325,88 @@ mod tests {
         let new_history = db.get_history().unwrap();
         assert_eq!(new_history[0].value_text, Some("To be pinned".to_string()));
         assert!(new_history[0].is_pinned);
+    }
+
+    #[test]
+    fn test_empty_string() {
+        let db = Database::in_memory().unwrap();
+        db.add_text_item("").unwrap();
+
+        let history = db.get_history().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].value_text, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_whitespace_only_string() {
+        let db = Database::in_memory().unwrap();
+        db.add_text_item("   ").unwrap();
+
+        let history = db.get_history().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].value_text, Some("   ".to_string()));
+    }
+
+    #[test]
+    fn test_very_long_string() {
+        let db = Database::in_memory().unwrap();
+        let long_text = "A".repeat(100000);
+        db.add_text_item(&long_text).unwrap();
+
+        let history = db.get_history().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].value_text, Some(long_text));
+    }
+
+    #[test]
+    fn test_special_characters() {
+        let db = Database::in_memory().unwrap();
+        let special_text = "Test with émojis 🎉 and spëcial çhars\n\tand \"quotes\"";
+        db.add_text_item(special_text).unwrap();
+
+        let history = db.get_history().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].value_text, Some(special_text.to_string()));
+    }
+
+    #[test]
+    fn test_cyrillic_text() {
+        let db = Database::in_memory().unwrap();
+        let cyrillic_text = "Привет мир! Тест кириллицы";
+        db.add_text_item(cyrillic_text).unwrap();
+
+        let history = db.get_history().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].value_text, Some(cyrillic_text.to_string()));
+    }
+
+    #[test]
+    fn test_duplicate_items() {
+        let db = Database::in_memory().unwrap();
+        db.add_text_item("Duplicate").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        db.add_text_item("Duplicate").unwrap();
+
+        let history = db.get_history().unwrap();
+        // Database deduplicates items with the same text
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].value_text, Some("Duplicate".to_string()));
+    }
+
+    #[test]
+    fn test_delete_nonexistent_item() {
+        let db = Database::in_memory().unwrap();
+        let result = db.delete_item(999999);
+        // Deleting a nonexistent item returns Ok (no-op)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_toggle_pin_nonexistent_item() {
+        let db = Database::in_memory().unwrap();
+        let result = db.toggle_pin(999999);
+        // Toggling pin on nonexistent item returns error
+        assert!(result.is_err());
     }
 
     #[test]
