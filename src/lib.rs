@@ -4,8 +4,10 @@ pub mod paster;
 pub mod ipc;
 pub mod autostart;
 pub mod gui;
+pub mod app;
 
 use std::sync::{Arc, Mutex, OnceLock};
+use fuzzy_matcher::skim::SkimMatcherV2;
 use crate::database::Database;
 use crate::gui::GuiManager;
 
@@ -15,6 +17,11 @@ pub struct GlobalState {
 }
 
 pub static STATE: OnceLock<Mutex<Option<GlobalState>>> = OnceLock::new();
+pub static MATCHER: OnceLock<SkimMatcherV2> = OnceLock::new();
+
+pub fn get_matcher() -> &'static SkimMatcherV2 {
+    MATCHER.get_or_init(SkimMatcherV2::default)
+}
 
 pub fn get_state() -> &'static Mutex<Option<GlobalState>> {
     STATE.get_or_init(|| Mutex::new(None))

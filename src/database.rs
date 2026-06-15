@@ -302,6 +302,24 @@ impl Database {
         conn.execute("DELETE FROM clipboard_items WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    /// Удаляет все незакрепленные элементы из истории
+    pub fn clear_unpinned(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // Получаем пути к изображениям для удаления файлов
+        let mut stmt = conn.prepare("SELECT image_path FROM clipboard_items WHERE is_pinned = 0 AND data_type = 'Image'")?;
+        let image_paths = stmt.query_map([], |row| row.get::<_, Option<String>>(0))?;
+
+        for path_opt in image_paths {
+            if let Ok(Some(path_str)) = path_opt {
+                let _ = fs::remove_file(PathBuf::from(path_str));
+            }
+        }
+
+        conn.execute("DELETE FROM clipboard_items WHERE is_pinned = 0", [])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
