@@ -1,25 +1,18 @@
 use std::fs;
-use std::path::PathBuf;
 use log::info;
 
 const DESKTOP_FILE_CONTENT: &str = r#"[Desktop Entry]
 Type=Application
 Name=maccy-kde
 Comment=Clipboard manager for KDE Plasma
-Exec=maccy-kde --daemon
+Exec=maccy-kde
 Icon=edit-paste
 Terminal=false
 X-KDE-autostart-after=plasma-workspace.target
 "#;
 
-fn get_autostart_dir() -> PathBuf {
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".config")
-        });
-    config_dir.join("autostart")
+fn get_autostart_dir() -> std::path::PathBuf {
+    crate::infrastructure::system::paths::AppPaths::autostart_dir()
 }
 
 pub fn install_autostart() -> Result<(), Box<dyn std::error::Error>> {

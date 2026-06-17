@@ -114,39 +114,40 @@ impl Database {
         crate::infrastructure::system::paths::AppPaths::database_path()
     }
 
-    /// Детектирует категорию текстового контента
     fn detect_category(text: &str) -> Option<Category> {
-        // URL detection
-        if text.starts_with("http://") || text.starts_with("https://") || 
+        if text.starts_with("http://") || text.starts_with("https://") ||
            text.starts_with("www.") || (text.contains(".") && text.contains("/")) {
             return Some(Category::Url);
         }
-        
-        // Email detection
-        let email_regex = regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
-        if email_regex.is_match(text) {
+
+        static EMAIL_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        if EMAIL_RE.get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap()).is_match(text) {
             return Some(Category::Email);
         }
-        
-        // Account/Username detection (two patterns: @username or plain username)
-        let account_regex_with_at = regex::Regex::new(r"^@[a-zA-Z0-9_]+$").unwrap();
-        let account_regex_plain = regex::Regex::new(r"^[a-zA-Z0-9_]{3,20}$").unwrap();
-        
-        if account_regex_with_at.is_match(text) || (account_regex_plain.is_match(text) && !text.contains(" ") && !text.contains("@")) {
+
+        static ACCOUNT_WITH_AT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        static ACCOUNT_PLAIN_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+        if ACCOUNT_WITH_AT_RE.get_or_init(|| regex::Regex::new(r"^@[a-zA-Z0-9_]+$").unwrap()).is_match(text) ||
+           (ACCOUNT_PLAIN_RE.get_or_init(|| regex::Regex::new(r"^[a-zA-Z0-9_]{3,20}$").unwrap()).is_match(text) && !text.contains(" ") && !text.contains("@")) {
             return Some(Category::Account);
         }
-        
+
         Some(Category::Other)
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some(format!("Mutex poisoned: {}", e)),
+        ))
     }
 
     /// Добавляет текстовый элемент в историю
     pub fn add_text_item(&self, text: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
         let category = Self::detect_category(text).map(|c| c.to_string());
-        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-            Some(format!("Mutex poisoned: {}", e)),
-        ))?;
+        let conn = self.lock()?;
 
         // Проверяем, есть ли уже такой текст
         let mut stmt = conn.prepare("SELECT id FROM clipboard_items WHERE value_text = ?1 AND data_type = 'Text'")?;
@@ -174,10 +175,7 @@ impl Database {
     /// Добавляет изображение в историю
     pub fn add_image_item(&self, image: &RgbaImage, mime_type: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-            Some(format!("Mutex poisoned: {}", e)),
-        ))?;
+        let conn = self.lock()?;
 
         // Сохраняем изображение в кэш
         let cache_path = Self::get_cache_path();
@@ -236,10 +234,7 @@ impl Database {
     }
 
     pub fn get_history(&self) -> Result<Vec<ClipboardItem>> {
-        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-            Some(format!("Mutex poisoned: {}", e)),
-        ))?;
+        let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, value_text, image_path, data_type, raw_mime_type, category, is_pinned, pin_order, last_used_at 
              FROM clipboard_items 
@@ -279,10 +274,7 @@ impl Database {
     }
 
     pub fn toggle_pin(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-            Some(format!("Mutex poisoned: {}", e)),
-        ))?;
+        let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT is_pinned FROM clipboard_items WHERE id = ?1")?;
         let is_pinned: i32 = stmt.query_row(params![id], |row| row.get(0))?;
         drop(stmt);
@@ -296,10 +288,7 @@ impl Database {
     }
 
     pub fn delete_item(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-            Some(format!("Mutex poisoned: {}", e)),
-        ))?;
+        let conn = self.lock()?;
         // Сначала получаем путь к изображению
         let mut stmt = conn.prepare("SELECT image_path FROM clipboard_items WHERE id = ?1")?;
         let image_path_str: Option<String> = stmt.query_row(params![id], |row| row.get(0)).optional()?;

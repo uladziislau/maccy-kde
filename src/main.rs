@@ -4,28 +4,11 @@ mod paster;
 mod ipc;
 mod autostart;
 
-// New architecture modules
-mod shared;
-mod domain;
-mod infrastructure;
-mod application;
-mod presentation;
-mod cli;
-mod integration;
-
-// Bootstrap and modular entry points
 mod bootstrap;
-mod daemon;
-mod popup;
-
-// Integration tests
-#[cfg(test)]
-mod integration_tests;
+mod infrastructure;
 
 use log::{info, error};
-use database::Database;
-use integration::RepositoryBridge;
-use domain::repositories::ClipboardRepository;
+use database::{Database, ClipboardItem, DataType};
 use slint::{ModelRc, VecModel, SharedString};
 use std::sync::Arc;
 use std::rc::Rc;
@@ -39,9 +22,8 @@ fn main() {
     bootstrap::Bootstrap::from_args().run();
 }
 
-/// Для разработки: запускаем всё в одном процессе
+/// Запуск всего в одном процессе
 pub fn run_all_in_one() {
-    // Initialize the database
     let db = match Database::new() {
         Ok(db) => Arc::new(db),
         Err(e) => {
@@ -50,11 +32,6 @@ pub fn run_all_in_one() {
         }
     };
 
-    // Create repository bridge (new architecture)
-    let repository = Arc::new(RepositoryBridge::new(db.clone()));
-
-    // Start background clipboard monitor using legacy clipboard monitor
-    // TODO: Migrate to MonitorService + ItemManagementService
     let db_monitor = db.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -62,249 +39,192 @@ pub fn run_all_in_one() {
             .build()
             .expect("Failed to create Tokio runtime");
         rt.block_on(async {
-            // Use legacy clipboard monitor for now - it's more reliable
-            // TODO: Implement proper clipboard monitor with ItemManagementService
-            use crate::clipboard;
             clipboard::start_clipboard_monitor(db_monitor).await;
-            // Keep the runtime alive
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
             }
         });
     });
 
-    // Create the Slint UI
     let ui = MaccyMenu::new().expect("Failed to create Slint UI");
 
-    // Load initial history using repository bridge
-    let repo_ui = repository.clone();
-    refresh_ui_items(&ui, &repo_ui, "");
+    refresh_ui(&ui, &db, "");
 
-    // --- Callback: search changed ---
+    // --- search ---
     let ui_weak = ui.as_weak();
-    let repo_search = repository.clone();
+    let db_search = db.clone();
     ui.on_search_changed(move |text| {
         let ui = ui_weak.upgrade().expect("UI was dropped");
-        let query = text.to_string();
-        refresh_ui_items(&ui, &repo_search, &query);
+        refresh_ui(&ui, &db_search, &text.to_string());
     });
 
-    // --- Callback: paste item ---
+    // --- paste ---
     let ui_weak = ui.as_weak();
-    let repo_paste = repository.clone();
     let db_paste = db.clone();
     ui.on_paste_item(move |id| {
         info!("Paste item id={}", id);
-        // Find the item using repository
-        if let Ok(Some(item)) = repo_paste.find_by_id(crate::domain::entities::ItemId(id as i64)) {
-            // Update last_used_at by finding the item again (touch)
-            let _ = repo_paste.find_by_id(crate::domain::entities::ItemId(id as i64));
-            // Get the content for paste from legacy database
-            let legacy: database::ClipboardItem = (&item).into();
-            match legacy.data_type {
-                crate::database::DataType::Text => {
-                    if let Some(text) = &legacy.value_text {
-                        let _ = db_paste.add_text_item(text);
-                        // Close window first, then paste into the focused app
-                        let ui = ui_weak.upgrade().expect("UI was dropped");
-                        if let Err(e) = ui.hide() {
-                            error!("Failed to hide UI: {:?}", e);
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        paster::paste_text(text);
-                    }
-                },
-                crate::database::DataType::Image => {
-                    // TODO: Обработка вставки изображений
-                    if let Some(path) = &legacy.image_path {
-                        let ui = ui_weak.upgrade().expect("UI was dropped");
-                        if let Err(e) = ui.hide() {
-                            error!("Failed to hide UI: {:?}", e);
-                        }
-                        info!("Pasting image from: {:?}", path);
-                    }
+        let ui = ui_weak.upgrade().expect("UI was dropped");
+        let text = if let Ok(items) = db_paste.get_history() {
+            items.iter().find(|i| i.id == id as i64)
+                .and_then(|item| item.value_text.clone())
+        } else {
+            None
+        };
+        if let Some(ref text) = text {
+            let _ = db_paste.add_text_item(text);
+            if let Err(e) = ui.hide() {
+                error!("Failed to hide UI: {:?}", e);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            paster::paste_text(text);
+        } else {
+            if let Err(e) = ui.hide() {
+                error!("Failed to hide UI: {:?}", e);
+            }
+        }
+    });
+
+    // --- delete ---
+    let ui_weak = ui.as_weak();
+    let db_del = db.clone();
+    ui.on_delete_item(move |id| {
+        info!("Delete item id={}", id);
+        let _ = db_del.delete_item(id as i64);
+        let ui = ui_weak.upgrade().expect("UI was dropped");
+        refresh_ui(&ui, &db_del, &ui.get_search_text().to_string());
+    });
+
+    // --- pin ---
+    let ui_weak = ui.as_weak();
+    let db_pin = db.clone();
+    ui.on_toggle_pin(move |id| {
+        info!("Toggle pin id={}", id);
+        let _ = db_pin.toggle_pin(id as i64);
+        let ui = ui_weak.upgrade().expect("UI was dropped");
+        refresh_ui(&ui, &db_pin, &ui.get_search_text().to_string());
+    });
+
+    // --- close ---
+    let ui_weak = ui.as_weak();
+    ui.on_request_close(move || {
+        let ui = ui_weak.upgrade().expect("UI was dropped");
+        if let Err(e) = ui.hide() {
+            error!("Failed to hide UI: {:?}", e);
+        }
+    });
+
+    ui.run().expect("Failed to run Slint event loop");
+}
+
+fn filter_items<'a>(items: &'a [ClipboardItem], query: &str) -> Vec<&'a ClipboardItem> {
+    if query.is_empty() {
+        return items.iter().collect();
+    }
+
+    let (cat_filter, search_q) = parse_query(query);
+    let matcher = SkimMatcherV2::default();
+
+    let mut scored: Vec<_> = items
+        .iter()
+        .filter_map(|item| {
+            if let Some(ref cat) = cat_filter {
+                if item.category.as_ref() != Some(cat) {
+                    return None;
                 }
             }
-            return;
-        }
-        let ui = ui_weak.upgrade().expect("UI was dropped");
-        if let Err(e) = ui.hide() {
-            error!("Failed to hide UI: {:?}", e);
-        }
-    });
-
-    // --- Callback: delete item ---
-    let ui_weak = ui.as_weak();
-    let repo_del = repository.clone();
-    ui.on_delete_item(move |id| {
-        info!("Delete item id={}", id);
-        let _ = repo_del.delete(crate::domain::entities::ItemId(id as i64));
-        let ui = ui_weak.upgrade().expect("UI was dropped");
-        refresh_ui_items(&ui, &repo_del, &ui.get_search_text().to_string());
-    });
-
-    // --- Callback: toggle pin ---
-    let ui_weak = ui.as_weak();
-    let repo_pin = repository.clone();
-    ui.on_toggle_pin(move |id| {
-        info!("Toggle pin id={}", id);
-        // Get current item to check pin state
-        let current = repo_pin.find_by_id(crate::domain::entities::ItemId(id as i64));
-        if let Ok(Some(_item)) = current {
-            let _ = repo_pin.toggle_pin(crate::domain::entities::ItemId(id as i64));
-        }
-        let ui = ui_weak.upgrade().expect("UI was dropped");
-        refresh_ui_items(&ui, &repo_pin, &ui.get_search_text().to_string());
-    });
-
-    // --- Callback: close ---
-    let ui_weak = ui.as_weak();
-    ui.on_request_close(move || {
-        let ui = ui_weak.upgrade().expect("UI was dropped");
-        if let Err(e) = ui.hide() {
-            error!("Failed to hide UI: {:?}", e);
-        }
-    });
-
-    // Run the Slint event loop
-    ui.run().expect("Failed to run Slint event loop");
-}
-
-/// Запустить демон
-pub fn run_daemon() {
-    daemon::run();
-}
-
-/// Запустить popup
-pub fn run_popup() {
-    popup::run();
-}
-
-/// Запустить popup с подключением к демону через IPC
-pub fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
-    let ui = MaccyMenu::new().expect("Failed to create Slint UI for popup");
-
-    // Загрузить начальный список
-    let initial_history = match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
-        Ok(ipc::IpcResponse::History(items)) => items,
-        _ => vec![]
-    };
-    refresh_ui_items_from_history(&ui, &initial_history, "");
-
-    // --- Callback: search changed ---
-    let ui_weak = ui.as_weak();
-    let rt_for_search = rt.handle().clone();
-    ui.on_search_changed(move |text| {
-        let ui = ui_weak.upgrade().expect("UI was dropped");
-        let query = text.to_string();
-        if let Ok(ipc::IpcResponse::History(items)) = rt_for_search.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
-            refresh_ui_items_from_history(&ui, &items, &query);
-        }
-    });
-
-    // --- Callback: paste item ---
-    let ui_weak = ui.as_weak();
-    let rt_for_paste = rt.handle().clone();
-    ui.on_paste_item(move |id| {
-        info!("Paste item id={}", id);
-        let ui = ui_weak.upgrade().expect("UI was dropped");
-        if let Err(e) = ui.hide() {
-            error!("Failed to hide UI: {:?}", e);
-        }
-        let _ = rt_for_paste.block_on(ipc::send_command(ipc::IpcCommand::SelectItem { id: id as i64 }));
-    });
-
-    // --- Callback: delete item ---
-    let ui_weak = ui.as_weak();
-    let rt_for_delete = rt.handle().clone();
-    ui.on_delete_item(move |id| {
-        info!("Delete item id={}", id);
-        let ui = ui_weak.upgrade().expect("UI was dropped");
-        if let Ok(ipc::IpcResponse::History(items)) = rt_for_delete.block_on(ipc::send_command(ipc::IpcCommand::DeleteItem { id: id as i64 })) {
-            refresh_ui_items_from_history(&ui, &items, &ui.get_search_text().to_string());
-        }
-    });
-
-    // --- Callback: toggle pin ---
-    let ui_weak = ui.as_weak();
-    let rt_for_pin = rt.handle().clone();
-    ui.on_toggle_pin(move |id| {
-        info!("Toggle pin id={}", id);
-        let ui = ui_weak.upgrade().expect("UI was dropped");
-        if let Ok(ipc::IpcResponse::History(items)) = rt_for_pin.block_on(ipc::send_command(ipc::IpcCommand::TogglePin { id: id as i64 })) {
-            refresh_ui_items_from_history(&ui, &items, &ui.get_search_text().to_string());
-        }
-    });
-
-    // --- Callback: close ---
-    let ui_weak = ui.as_weak();
-    ui.on_request_close(move || {
-        let ui = ui_weak.upgrade().expect("UI was dropped");
-        if let Err(e) = ui.hide() {
-            error!("Failed to hide UI: {:?}", e);
-        }
-    });
-
-    ui.run().expect("Failed to run Slint event loop");
-}
-
-/// Refresh UI из списка ClipboardItem
-pub fn refresh_ui_items_from_history(ui: &MaccyMenu, items: &[database::ClipboardItem], query: &str) {
-    let filtered = filter_items_fuzzy(items, query);
-
-    let entries: Vec<ClipboardEntry> = filtered
-        .iter()
-        .map(|item| {
-            let display_text = match &item.value_text {
-                Some(text) if text.chars().count() > 100 => {
-                    let truncated: String = text.chars().take(100).collect();
-                    format!("{}…", truncated)
-                },
-                Some(text) => text.clone(),
-                None => "📷 Изображение".to_string(),
-            };
-            
-            let data_type_str = match item.data_type {
-                database::DataType::Text => "Text",
-                database::DataType::Image => "Image",
-            };
-            
-            let category_str = match &item.category {
-                Some(database::Category::Url) => "Url",
-                Some(database::Category::Email) => "Email",
-                Some(database::Category::Account) => "Account",
-                Some(database::Category::Picture) => "Picture",
-                Some(database::Category::Other) => "Other",
-                None => "",
-            };
-            
-            let image_path_str = item.image_path.as_ref()
-                .and_then(|p| p.to_str())
-                .unwrap_or("");
-            
-            ClipboardEntry {
-                id: item.id as i32,
-                text: SharedString::from(display_text),
-                image_path: SharedString::from(image_path_str),
-                data_type: SharedString::from(data_type_str),
-                category: SharedString::from(category_str),
-                is_pinned: item.is_pinned,
-                shortcut_index: 0, // assigned by Slint via index
+            if !search_q.is_empty() {
+                let text = item.value_text.as_deref().unwrap_or("Изображение");
+                matcher.fuzzy_match(text, search_q).map(|s| (item, s))
+            } else {
+                Some((item, 100))
             }
         })
         .collect();
 
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.into_iter().map(|(item, _)| item).collect()
+}
+
+fn parse_query(query: &str) -> (Option<database::Category>, &str) {
+    if query.starts_with('@') {
+        let parts: Vec<&str> = query.splitn(2, ' ').collect();
+        let cat = match parts[0].to_lowercase().as_str() {
+            "@url" => Some(database::Category::Url),
+            "@email" => Some(database::Category::Email),
+            "@account" => Some(database::Category::Account),
+            "@picture" => Some(database::Category::Picture),
+            "@other" => Some(database::Category::Other),
+            _ => None,
+        };
+        (cat, if parts.len() > 1 { parts[1].trim() } else { "" })
+    } else {
+        (None, query)
+    }
+}
+
+fn refresh_ui(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
+    let items = match db.get_history() {
+        Ok(items) => items,
+        Err(e) => {
+            error!("Failed to get history: {}", e);
+            return;
+        }
+    };
+
+    let filtered = filter_items(&items, query);
+    let entries: Vec<ClipboardEntry> = filtered.iter().map(|item| item_to_entry(item)).collect();
     let model = Rc::new(VecModel::from(entries));
     ui.set_items(ModelRc::from(model));
     ui.set_current_index(0);
 }
 
-#[cfg(test)]
-mod fuzzy_search_tests {
-    use super::*;
-    use crate::database::{ClipboardItem, DataType, Category};
+fn item_to_entry(item: &ClipboardItem) -> ClipboardEntry {
+    let display_text = match &item.value_text {
+        Some(text) if text.chars().count() > 100 => {
+            let truncated: String = text.chars().take(100).collect();
+            format!("{}…", truncated)
+        }
+        Some(text) => text.clone(),
+        None => "📷 Изображение".to_string(),
+    };
 
-    fn create_test_item(id: i64, text: &str) -> ClipboardItem {
+    let data_type_str = match item.data_type {
+        DataType::Text => "Text",
+        DataType::Image => "Image",
+    };
+
+    let category_str = match &item.category {
+        Some(database::Category::Url) => "Url",
+        Some(database::Category::Email) => "Email",
+        Some(database::Category::Account) => "Account",
+        Some(database::Category::Picture) => "Picture",
+        Some(database::Category::Other) => "Other",
+        None => "",
+    };
+
+    let image_path_str = item
+        .image_path
+        .as_ref()
+        .and_then(|p| p.to_str())
+        .unwrap_or("");
+
+    ClipboardEntry {
+        id: item.id as i32,
+        text: SharedString::from(display_text),
+        image_path: SharedString::from(image_path_str),
+        data_type: SharedString::from(data_type_str),
+        category: SharedString::from(category_str),
+        is_pinned: item.is_pinned,
+        shortcut_index: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use database::{ClipboardItem, DataType, Category};
+
+    fn make_item(id: i64, text: &str) -> ClipboardItem {
         ClipboardItem {
             id,
             value_text: Some(text.to_string()),
@@ -319,320 +239,54 @@ mod fuzzy_search_tests {
     }
 
     #[test]
-    fn test_filter_items_fuzzy_empty_query() {
-        let items = vec![
-            create_test_item(1, "Hello World"),
-            create_test_item(2, "Test Item"),
-        ];
-        
-        let filtered = filter_items_fuzzy(&items, "");
-        assert_eq!(filtered.len(), 2);
+    fn test_filter_empty_query() {
+        let items = vec![make_item(1, "Hello"), make_item(2, "World")];
+        assert_eq!(filter_items(&items, "").len(), 2);
     }
 
     #[test]
-    fn test_filter_items_fuzzy_exact_match() {
-        let items = vec![
-            create_test_item(1, "Hello World"),
-            create_test_item(2, "Test Item"),
-        ];
-        
-        let filtered = filter_items_fuzzy(&items, "Hello");
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].value_text, Some("Hello World".to_string()));
+    fn test_filter_exact_match() {
+        let items = vec![make_item(1, "Hello World"), make_item(2, "Test")];
+        assert_eq!(filter_items(&items, "Hello").len(), 1);
     }
 
     #[test]
-    fn test_filter_items_fuzzy_partial_match() {
-        let items = vec![
-            create_test_item(1, "Hello World"),
-            create_test_item(2, "Hello There"),
-            create_test_item(3, "Test Item"),
-        ];
-        
-        let filtered = filter_items_fuzzy(&items, "He");
-        assert_eq!(filtered.len(), 2);
+    fn test_filter_no_match() {
+        let items = vec![make_item(1, "Hello")];
+        assert!(filter_items(&items, "xyz").is_empty());
     }
 
     #[test]
-    fn test_filter_items_fuzzy_no_match() {
-        let items = vec![
-            create_test_item(1, "Hello World"),
-            create_test_item(2, "Test Item"),
-        ];
-        
-        let filtered = filter_items_fuzzy(&items, "xyz");
-        assert_eq!(filtered.len(), 0);
+    fn test_filter_cyrillic() {
+        let items = vec![make_item(1, "Привет мир")];
+        assert_eq!(filter_items(&items, "Прив").len(), 1);
     }
 
     #[test]
-    fn test_filter_items_fuzzy_cyrillic() {
-        let items = vec![
-            create_test_item(1, "Привет мир"),
-            create_test_item(2, "Тестовый элемент"),
-        ];
-        
-        let filtered = filter_items_fuzzy(&items, "Прив");
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].value_text, Some("Привет мир".to_string()));
+    fn test_filter_emoji() {
+        let items = vec![make_item(1, "Hello 🌍")];
+        assert_eq!(filter_items(&items, "🌍").len(), 1);
     }
 
     #[test]
-    fn test_filter_items_fuzzy_emoji() {
-        let items = vec![
-            create_test_item(1, "Hello 🌍"),
-            create_test_item(2, "Test 🚀"),
-        ];
-        
-        let filtered = filter_items_fuzzy(&items, "🌍");
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].value_text, Some("Hello 🌍".to_string()));
-    }
-
-    #[test]
-    fn test_filter_items_fuzzy_image_item() {
+    fn test_filter_by_category() {
         let items = vec![
             ClipboardItem {
-                id: 1,
-                value_text: None,
-                image_path: Some(std::path::PathBuf::from("/path/to/image.png")),
-                data_type: DataType::Image,
-                raw_mime_type: "image/png".to_string(),
-                category: Some(Category::Picture),
-                is_pinned: false,
-                pin_order: 0,
-                last_used_at: chrono::Utc::now().timestamp(),
-            },
-            create_test_item(2, "Test Item"),
-        ];
-        
-        let filtered = filter_items_fuzzy(&items, "Изображение");
-        assert_eq!(filtered.len(), 1);
-        assert!(filtered[0].value_text.is_none());
-    }
-
-    #[test]
-    fn test_filter_items_fuzzy_case_sensitivity() {
-        let items = vec![
-            create_test_item(1, "Hello World"),
-            create_test_item(2, "HELLO THERE"),
-        ];
-        
-        let filtered = filter_items_fuzzy(&items, "hello");
-        // fuzzy-matcher is case-insensitive by default
-        assert!(filtered.len() >= 1);
-    }
-
-    #[test]
-    fn test_filter_items_by_category_url() {
-        let items = vec![
-            ClipboardItem {
-                id: 1,
-                value_text: Some("https://example.com".to_string()),
-                image_path: None,
-                data_type: DataType::Text,
+                id: 1, value_text: Some("https://example.com".to_string()),
+                image_path: None, data_type: DataType::Text,
                 raw_mime_type: "text/plain".to_string(),
-                category: Some(Category::Url),
-                is_pinned: false,
-                pin_order: 0,
-                last_used_at: chrono::Utc::now().timestamp(),
+                category: Some(Category::Url), is_pinned: false,
+                pin_order: 0, last_used_at: 0,
             },
             ClipboardItem {
-                id: 2,
-                value_text: Some("user@example.com".to_string()),
-                image_path: None,
-                data_type: DataType::Text,
+                id: 2, value_text: Some("user@example.com".to_string()),
+                image_path: None, data_type: DataType::Text,
                 raw_mime_type: "text/plain".to_string(),
-                category: Some(Category::Email),
-                is_pinned: false,
-                pin_order: 0,
-                last_used_at: chrono::Utc::now().timestamp(),
+                category: Some(Category::Email), is_pinned: false,
+                pin_order: 0, last_used_at: 0,
             },
         ];
-
-        let filtered = filter_items_fuzzy(&items, "@url");
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].value_text, Some("https://example.com".to_string()));
+        assert_eq!(filter_items(&items, "@url").len(), 1);
+        assert_eq!(filter_items(&items, "@email").len(), 1);
     }
-
-    #[test]
-    fn test_filter_items_by_category_email() {
-        let items = vec![
-            ClipboardItem {
-                id: 1,
-                value_text: Some("https://example.com".to_string()),
-                image_path: None,
-                data_type: DataType::Text,
-                raw_mime_type: "text/plain".to_string(),
-                category: Some(Category::Url),
-                is_pinned: false,
-                pin_order: 0,
-                last_used_at: chrono::Utc::now().timestamp(),
-            },
-            ClipboardItem {
-                id: 2,
-                value_text: Some("user@example.com".to_string()),
-                image_path: None,
-                data_type: DataType::Text,
-                raw_mime_type: "text/plain".to_string(),
-                category: Some(Category::Email),
-                is_pinned: false,
-                pin_order: 0,
-                last_used_at: chrono::Utc::now().timestamp(),
-            },
-        ];
-
-        let filtered = filter_items_fuzzy(&items, "@email");
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].value_text, Some("user@example.com".to_string()));
-    }
-
-    #[test]
-    fn test_filter_items_by_category_with_text_search() {
-        let items = vec![
-            ClipboardItem {
-                id: 1,
-                value_text: Some("https://github.com".to_string()),
-                image_path: None,
-                data_type: DataType::Text,
-                raw_mime_type: "text/plain".to_string(),
-                category: Some(Category::Url),
-                is_pinned: false,
-                pin_order: 0,
-                last_used_at: chrono::Utc::now().timestamp(),
-            },
-            ClipboardItem {
-                id: 2,
-                value_text: Some("https://example.com".to_string()),
-                image_path: None,
-                data_type: DataType::Text,
-                raw_mime_type: "text/plain".to_string(),
-                category: Some(Category::Url),
-                is_pinned: false,
-                pin_order: 0,
-                last_used_at: chrono::Utc::now().timestamp(),
-            },
-        ];
-
-        let filtered = filter_items_fuzzy(&items, "@url github");
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].value_text, Some("https://github.com".to_string()));
-    }
-}
-
-/// Filter clipboard items using fuzzy search
-pub fn filter_items_fuzzy<'a>(items: &'a [database::ClipboardItem], query: &str) -> Vec<&'a database::ClipboardItem> {
-    if query.is_empty() {
-        return items.iter().collect();
-    }
-
-    // Check for category filter syntax (@url, @email, @account, @picture, @other)
-    let (category_filter, search_query) = if query.starts_with('@') {
-        let parts: Vec<&str> = query.splitn(2, ' ').collect();
-        let category_str = parts[0].to_lowercase();
-        let remaining_query = if parts.len() > 1 { parts[1].trim() } else { "" };
-        
-        let category_filter = match category_str.as_str() {
-            "@url" => Some(database::Category::Url),
-            "@email" => Some(database::Category::Email),
-            "@account" => Some(database::Category::Account),
-            "@picture" => Some(database::Category::Picture),
-            "@other" => Some(database::Category::Other),
-            _ => None,
-        };
-        
-        (category_filter, remaining_query)
-    } else {
-        (None, query)
-    };
-
-    let matcher = SkimMatcherV2::default();
-    let mut scored: Vec<_> = items
-        .iter()
-        .filter_map(|item| {
-            // Apply category filter if specified
-            if let Some(ref cat) = category_filter {
-                if item.category != Some(cat.clone()) {
-                    return None;
-                }
-            }
-            
-            // Apply text search if query is not empty
-            if !search_query.is_empty() {
-                let search_text = match &item.value_text {
-                    Some(text) => text,
-                    None => "Изображение",
-                };
-                matcher.fuzzy_match(search_text, search_query).map(|score| (item, score))
-            } else {
-                Some((item, 100)) // Default score for category-only filter
-            }
-        })
-        .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
-    scored.into_iter().map(|(item, _)| item).collect()
-}
-
-/// Refresh the item list in the UI, applying optional fuzzy search filter
-pub fn refresh_ui_items(ui: &MaccyMenu, repository: &Arc<RepositoryBridge>, query: &str) {
-    let items = match repository.find_all() {
-        Ok(items) => items,
-        Err(e) => {
-            error!("Failed to get history: {}", e);
-            return;
-        }
-    };
-
-    // Convert new ClipboardItem to legacy ClipboardItem for UI
-    let legacy_items: Vec<database::ClipboardItem> = items
-        .iter()
-        .map(|item| item.into())
-        .collect();
-
-    let filtered = filter_items_fuzzy(&legacy_items, query);
-
-    let entries: Vec<ClipboardEntry> = filtered
-        .iter()
-        .map(|item| {
-            let display_text = match &item.value_text {
-                Some(text) if text.chars().count() > 100 => {
-                    let truncated: String = text.chars().take(100).collect();
-                    format!("{}…", truncated)
-                },
-                Some(text) => text.clone(),
-                None => "📷 Изображение".to_string(),
-            };
-            
-            let data_type_str = match item.data_type {
-                database::DataType::Text => "Text",
-                database::DataType::Image => "Image",
-            };
-            
-            let category_str = match &item.category {
-                Some(database::Category::Url) => "Url",
-                Some(database::Category::Email) => "Email",
-                Some(database::Category::Account) => "Account",
-                Some(database::Category::Picture) => "Picture",
-                Some(database::Category::Other) => "Other",
-                None => "",
-            };
-            
-            let image_path_str = item.image_path.as_ref()
-                .and_then(|p| p.to_str())
-                .unwrap_or("");
-            
-            ClipboardEntry {
-                id: item.id as i32,
-                text: SharedString::from(display_text),
-                image_path: SharedString::from(image_path_str),
-                data_type: SharedString::from(data_type_str),
-                category: SharedString::from(category_str),
-                is_pinned: item.is_pinned,
-                shortcut_index: 0, // assigned by Slint via index
-            }
-        })
-        .collect();
-
-    let model = Rc::new(VecModel::from(entries));
-    ui.set_items(ModelRc::from(model));
-    ui.set_current_index(0);
 }

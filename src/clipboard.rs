@@ -2,16 +2,14 @@ use std::sync::Arc;
 use crate::database::Database;
 use log::{info, error};
 use image::RgbaImage;
-use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 pub async fn start_clipboard_monitor(db: Arc<Database>) {
     use arboard::Clipboard;
     use std::time::Duration;
-    use image::RgbaImage;
 
     info!("Starting macOS clipboard monitor (polling mode)");
-    
+
     tokio::task::spawn_blocking(move || {
         let mut ctx = match Clipboard::new() {
             Ok(c) => c,
@@ -20,12 +18,11 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
                 return;
             }
         };
-        
+
         let mut last_text = String::new();
         let mut last_image_hash: Option<u64> = None;
 
         loop {
-            // Проверяем текст
             if let Ok(text) = ctx.get_text() {
                 if text != last_text && !text.trim().is_empty() {
                     last_text = text.clone();
@@ -38,31 +35,24 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
                 }
             }
 
-            // Проверяем изображение
             if let Ok(image) = ctx.get_image() {
-                // Вычисляем простой хэш для сравнения
                 let hash = compute_image_hash(&image.bytes);
                 if last_image_hash != Some(hash) {
                     last_image_hash = Some(hash);
-                    // Сохраняем изображение во временный файл
                     if let Some(rgba_image) = RgbaImage::from_raw(
                         image.width as u32,
                         image.height as u32,
                         image.bytes.to_vec()
                     ) {
-                        let saved_path = save_image_temp(&rgba_image);
-                        if let Some(_path) = saved_path {
-                            if let Err(e) = db.add_image_item(&rgba_image, "image/png") {
-                                error!("Failed to add image item to DB: {}", e);
-                            } else {
-                                info!("Copied new image to DB");
-                            }
+                        if let Err(e) = db.add_image_item(&rgba_image, "image/png") {
+                            error!("Failed to add image item to DB: {}", e);
+                        } else {
+                            info!("Copied new image to DB");
                         }
                     }
                 }
             }
 
-            // Подождём перед следующей проверкой
             std::thread::sleep(Duration::from_millis(500));
         }
     });
@@ -72,15 +62,14 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
 pub async fn start_clipboard_monitor(db: Arc<Database>) {
     use wayland_clipboard_listener::WaylandClipboardListener;
     log::info!("Starting Wayland clipboard monitor");
-    
+
     let mut listener = WaylandClipboardListener::new();
-    
+
     if let Err(e) = listener.start() {
         log::error!("Failed to start Wayland clipboard listener: {}", e);
         return;
     }
-    
-    // Monitor text changes
+
     if let Some(mut text_listener) = listener.subscribe_text() {
         loop {
             if let Some(text) = text_listener.next() {
@@ -103,19 +92,4 @@ fn compute_image_hash(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     hasher.finish()
-}
-
-fn save_image_temp(image: &RgbaImage) -> Option<PathBuf> {
-    use uuid::Uuid;
-    
-    let temp_dir = std::env::temp_dir();
-    let filename = format!("maccy_{}.png", Uuid::new_v4());
-    let path = temp_dir.join(filename);
-    
-    if let Err(e) = image.save(&path) {
-        log::error!("Failed to save image: {}", e);
-        None
-    } else {
-        Some(path)
-    }
 }
