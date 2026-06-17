@@ -3107,6 +3107,7 @@ dependencies = [
  "fuzzy-matcher",
  "image",
  "log",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

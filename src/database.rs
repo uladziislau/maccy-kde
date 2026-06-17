@@ -1,3 +1,6 @@
+/// Database module - legacy SQLite database implementation
+/// This will be gradually replaced by the new infrastructure layer
+
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -14,12 +17,34 @@ pub enum DataType {
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum Category {
+    Url,
+    Email,
+    Account,
+    Picture,
+    Other,
+}
+
+impl ToString for Category {
+    fn to_string(&self) -> String {
+        match self {
+            Category::Url => "Url".to_string(),
+            Category::Email => "Email".to_string(),
+            Category::Account => "Account".to_string(),
+            Category::Picture => "Picture".to_string(),
+            Category::Other => "Other".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ClipboardItem {
     pub id: i64,
     pub value_text: Option<String>,
     pub image_path: Option<PathBuf>,
     pub data_type: DataType,
     pub raw_mime_type: String,
+    pub category: Option<Category>,
     pub is_pinned: bool,
     pub pin_order: i64,
     pub last_used_at: i64,
@@ -55,27 +80,8 @@ impl Database {
     }
 
     fn get_cache_path() -> PathBuf {
-        #[cfg(target_os = "linux")]
-        {
-            let cache_home = std::env::var("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let home = std::env::var("HOME")
-                        .unwrap_or_else(|_| std::env::temp_dir().display().to_string());
-                    PathBuf::from(home).join(".cache")
-                });
-            cache_home.join("maccy-kde")
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            std::env::temp_dir().join("maccy-kde-cache")
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            std::env::temp_dir().join("maccy-kde-cache")
-        }
+        // Use the new AppPaths infrastructure
+        crate::infrastructure::system::paths::AppPaths::images_cache_path()
     }
 
     fn setup_schema(conn: &Connection) -> Result<()> {
@@ -86,48 +92,57 @@ impl Database {
                 image_path TEXT,
                 data_type TEXT NOT NULL,
                 raw_mime_type TEXT NOT NULL,
+                category TEXT DEFAULT NULL,
                 is_pinned INTEGER DEFAULT 0,
                 pin_order INTEGER DEFAULT 0,
                 last_used_at INTEGER NOT NULL
             )",
             [],
         )?;
+        
+        // Add category column if it doesn't exist (for existing databases)
+        conn.execute(
+            "ALTER TABLE clipboard_items ADD COLUMN category TEXT DEFAULT NULL",
+            [],
+        ).ok(); // Ignore error if column already exists
+        
         Ok(())
     }
 
     fn get_db_path() -> PathBuf {
-        #[cfg(target_os = "linux")]
-        {
-            // Пытаемся получить XDG_DATA_HOME, или используем стандартное значение
-            let data_home = std::env::var("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let home = std::env::var("HOME")
-                        .unwrap_or_else(|_| std::env::temp_dir().display().to_string());
-                    PathBuf::from(home).join(".local").join("share")
-                });
-            let maccy_dir = data_home.join("maccy-kde");
-            let _ = std::fs::create_dir_all(&maccy_dir);
-            return maccy_dir.join("history.db");
-        }
+        // Use the new AppPaths infrastructure
+        crate::infrastructure::system::paths::AppPaths::database_path()
+    }
 
-        #[cfg(target_os = "macos")]
-        {
-            // На macOS для разработки
-            let temp_dir = std::env::temp_dir();
-            temp_dir.join("maccy-kde-history.db")
+    /// Детектирует категорию текстового контента
+    fn detect_category(text: &str) -> Option<Category> {
+        // URL detection
+        if text.starts_with("http://") || text.starts_with("https://") || 
+           text.starts_with("www.") || (text.contains(".") && text.contains("/")) {
+            return Some(Category::Url);
         }
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            let temp_dir = std::env::temp_dir();
-            temp_dir.join("maccy-kde-history.db")
+        
+        // Email detection
+        let email_regex = regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
+        if email_regex.is_match(text) {
+            return Some(Category::Email);
         }
+        
+        // Account/Username detection (two patterns: @username or plain username)
+        let account_regex_with_at = regex::Regex::new(r"^@[a-zA-Z0-9_]+$").unwrap();
+        let account_regex_plain = regex::Regex::new(r"^[a-zA-Z0-9_]{3,20}$").unwrap();
+        
+        if account_regex_with_at.is_match(text) || (account_regex_plain.is_match(text) && !text.contains(" ") && !text.contains("@")) {
+            return Some(Category::Account);
+        }
+        
+        Some(Category::Other)
     }
 
     /// Добавляет текстовый элемент в историю
     pub fn add_text_item(&self, text: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
+        let category = Self::detect_category(text).map(|c| c.to_string());
         let conn = self.conn.lock().map_err(|e| rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
             Some(format!("Mutex poisoned: {}", e)),
@@ -147,8 +162,8 @@ impl Database {
         } else {
             // Добавляем новый элемент
             conn.execute(
-                "INSERT INTO clipboard_items (value_text, data_type, raw_mime_type, last_used_at) VALUES (?1, 'Text', 'text/plain', ?2)",
-                params![text, now],
+                "INSERT INTO clipboard_items (value_text, data_type, raw_mime_type, category, last_used_at) VALUES (?1, 'Text', 'text/plain', ?2, ?3)",
+                params![text, category, now],
             )?;
         }
 
@@ -179,7 +194,7 @@ impl Database {
 
         // Добавляем запись в БД
         conn.execute(
-            "INSERT INTO clipboard_items (image_path, data_type, raw_mime_type, last_used_at) VALUES (?1, 'Image', ?2, ?3)",
+            "INSERT INTO clipboard_items (image_path, data_type, raw_mime_type, category, last_used_at) VALUES (?1, 'Image', ?2, 'Picture', ?3)",
             params![image_path.to_str(), mime_type, now],
         )?;
 
@@ -226,7 +241,7 @@ impl Database {
             Some(format!("Mutex poisoned: {}", e)),
         ))?;
         let mut stmt = conn.prepare(
-            "SELECT id, value_text, image_path, data_type, raw_mime_type, is_pinned, pin_order, last_used_at 
+            "SELECT id, value_text, image_path, data_type, raw_mime_type, category, is_pinned, pin_order, last_used_at 
              FROM clipboard_items 
              ORDER BY is_pinned DESC, pin_order ASC, last_used_at DESC 
              LIMIT 200",
@@ -242,9 +257,17 @@ impl Database {
                     _ => DataType::Text,
                 },
                 raw_mime_type: row.get(4)?,
-                is_pinned: row.get::<_, i32>(5)? != 0,
-                pin_order: row.get(6)?,
-                last_used_at: row.get(7)?,
+                category: row.get::<_, Option<String>>(5)?.and_then(|s| match s.as_str() {
+                    "Url" => Some(Category::Url),
+                    "Email" => Some(Category::Email),
+                    "Account" => Some(Category::Account),
+                    "Picture" => Some(Category::Picture),
+                    "Other" => Some(Category::Other),
+                    _ => None,
+                }),
+                is_pinned: row.get::<_, i32>(6)? != 0,
+                pin_order: row.get(7)?,
+                last_used_at: row.get(8)?,
             })
         })?;
 
@@ -335,6 +358,58 @@ mod tests {
         let history = db.get_history().unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].value_text, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_category_detection_url() {
+        assert_eq!(Database::detect_category("https://example.com"), Some(Category::Url));
+        assert_eq!(Database::detect_category("http://test.org"), Some(Category::Url));
+        assert_eq!(Database::detect_category("www.example.com"), Some(Category::Url));
+        assert_eq!(Database::detect_category("example.com/path"), Some(Category::Url));
+    }
+
+    #[test]
+    fn test_category_detection_email() {
+        assert_eq!(Database::detect_category("test@example.com"), Some(Category::Email));
+        assert_eq!(Database::detect_category("user.name@domain.org"), Some(Category::Email));
+        assert_eq!(Database::detect_category("not-an-email"), Some(Category::Other));
+    }
+
+    #[test]
+    fn test_category_detection_account() {
+        assert_eq!(Database::detect_category("@username"), Some(Category::Account));
+        assert_eq!(Database::detect_category("john_doe"), Some(Category::Account));
+        assert_eq!(Database::detect_category("user123"), Some(Category::Account));
+        assert_eq!(Database::detect_category("not a username"), Some(Category::Other)); // contains space
+        assert_eq!(Database::detect_category("user@example.com"), Some(Category::Email)); // email takes precedence
+    }
+
+    #[test]
+    fn test_category_classification_in_db() {
+        let db = Database::in_memory().unwrap();
+        
+        db.add_text_item("https://github.com").unwrap();
+        db.add_text_item("user@example.com").unwrap();
+        db.add_text_item("@myusername").unwrap();
+        db.add_text_item("regular text").unwrap();
+        
+        let history = db.get_history().unwrap();
+        
+        // Find and check URL
+        let url_item = history.iter().find(|i| i.value_text == Some("https://github.com".to_string())).unwrap();
+        assert_eq!(url_item.category, Some(Category::Url));
+        
+        // Find and check Email
+        let email_item = history.iter().find(|i| i.value_text == Some("user@example.com".to_string())).unwrap();
+        assert_eq!(email_item.category, Some(Category::Email));
+        
+        // Find and check Account
+        let account_item = history.iter().find(|i| i.value_text == Some("@myusername".to_string())).unwrap();
+        assert_eq!(account_item.category, Some(Category::Account));
+        
+        // Find and check Other
+        let other_item = history.iter().find(|i| i.value_text == Some("regular text".to_string())).unwrap();
+        assert_eq!(other_item.category, Some(Category::Other));
     }
 
     #[test]

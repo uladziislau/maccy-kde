@@ -5,6 +5,9 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+#[cfg(test)]
+use uuid::Uuid;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum IpcCommand {
     GetHistory,
@@ -25,13 +28,8 @@ pub fn get_socket_path() -> std::path::PathBuf {
     if let Ok(path_str) = std::env::var("MACCY_KDE_SOCKET_PATH") {
         return std::path::PathBuf::from(path_str);
     }
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            return std::path::PathBuf::from(runtime_dir).join("maccy-kde.sock");
-        }
-    }
-    std::env::temp_dir().join("maccy-kde.sock")
+    // Use the new AppPaths infrastructure
+    crate::infrastructure::system::paths::AppPaths::socket_path()
 }
 
 pub async fn start_ipc_server(db: Arc<Database>) -> Result<(), Box<dyn std::error::Error>> {
@@ -299,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore] // Temporarily ignored due to socket path isolation issues
     async fn test_ipc_select_item() {
         // Создаем временную базу данных
         let db = Arc::new(Database::in_memory().unwrap());
@@ -309,7 +307,7 @@ mod tests {
 
         // Создаем временную директорию для сокета
         let temp_dir = tempdir().unwrap();
-        let temp_socket_path = temp_dir.path().join("test_select.sock");
+        let temp_socket_path = temp_dir.path().join(format!("test_select_{}.sock", Uuid::new_v4()));
         std::env::set_var("MACCY_KDE_SOCKET_PATH", temp_socket_path.to_str().unwrap());
 
         // Запускаем сервер в отдельной задаче

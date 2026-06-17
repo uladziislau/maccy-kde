@@ -4,78 +4,43 @@ mod paster;
 mod ipc;
 mod autostart;
 
-use clap::Parser;
-use database::Database;
+// New architecture modules
+mod shared;
+mod domain;
+mod infrastructure;
+mod application;
+mod presentation;
+mod cli;
+mod integration;
+
+// Bootstrap and modular entry points
+mod bootstrap;
+mod daemon;
+mod popup;
+
+// Integration tests
+#[cfg(test)]
+mod integration_tests;
+
 use log::{info, error};
-use std::sync::Arc;
+use database::Database;
+use integration::RepositoryBridge;
+use domain::repositories::ClipboardRepository;
 use slint::{ModelRc, VecModel, SharedString};
+use std::sync::Arc;
 use std::rc::Rc;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 slint::include_modules!();
 
-/// Легковесный менеджер буфера обмена для KDE Plasma 6 (Wayland)
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Запустить фоновый демон
-    #[arg(long)]
-    daemon: bool,
-
-    /// Запустить графическое окно
-    #[arg(long)]
-    popup: bool,
-
-    /// Установить автостарт для KDE Plasma
-    #[arg(long)]
-    install_autostart: bool,
-
-    /// Удалить автостарт для KDE Plasma
-    #[arg(long)]
-    remove_autostart: bool,
-}
-
 fn main() {
     env_logger::init();
-    let args = Args::parse();
-
-    if args.install_autostart {
-        match autostart::install_autostart() {
-            Ok(_) => println!("Автостарт успешно установлен!"),
-            Err(e) => eprintln!("Ошибка установки автостарта: {}", e),
-        }
-        return;
-    }
-
-    if args.remove_autostart {
-        match autostart::remove_autostart() {
-            Ok(_) => println!("Автостарт успешно удален!"),
-            Err(e) => eprintln!("Ошибка удаления автостарта: {}", e),
-        }
-        return;
-    }
-
-    // Если ни один флаг не указан, запускаем всё (для разработки)
-    if !args.daemon && !args.popup {
-        info!("Starting maccy-kde in dev mode (everything)...");
-        run_all_in_one();
-        return;
-    }
-
-    if args.daemon {
-        info!("Starting maccy-kde daemon...");
-        run_daemon();
-    }
-
-    if args.popup {
-        info!("Starting maccy-kde popup...");
-        run_popup();
-    }
+    bootstrap::Bootstrap::from_args().run();
 }
 
 /// Для разработки: запускаем всё в одном процессе
-fn run_all_in_one() {
+pub fn run_all_in_one() {
     // Initialize the database
     let db = match Database::new() {
         Ok(db) => Arc::new(db),
@@ -85,7 +50,11 @@ fn run_all_in_one() {
         }
     };
 
-    // Start background clipboard monitor on a separate thread
+    // Create repository bridge (new architecture)
+    let repository = Arc::new(RepositoryBridge::new(db.clone()));
+
+    // Start background clipboard monitor using legacy clipboard monitor
+    // TODO: Migrate to MonitorService + ItemManagementService
     let db_monitor = db.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -93,6 +62,9 @@ fn run_all_in_one() {
             .build()
             .expect("Failed to create Tokio runtime");
         rt.block_on(async {
+            // Use legacy clipboard monitor for now - it's more reliable
+            // TODO: Implement proper clipboard monitor with ItemManagementService
+            use crate::clipboard;
             clipboard::start_clipboard_monitor(db_monitor).await;
             // Keep the runtime alive
             loop {
@@ -104,54 +76,56 @@ fn run_all_in_one() {
     // Create the Slint UI
     let ui = MaccyMenu::new().expect("Failed to create Slint UI");
 
-    // Load initial history
-    let db_ui = db.clone();
-    refresh_ui_items(&ui, &db_ui, "");
+    // Load initial history using repository bridge
+    let repo_ui = repository.clone();
+    refresh_ui_items(&ui, &repo_ui, "");
 
     // --- Callback: search changed ---
     let ui_weak = ui.as_weak();
-    let db_search = db.clone();
+    let repo_search = repository.clone();
     ui.on_search_changed(move |text| {
         let ui = ui_weak.upgrade().expect("UI was dropped");
         let query = text.to_string();
-        refresh_ui_items(&ui, &db_search, &query);
+        refresh_ui_items(&ui, &repo_search, &query);
     });
 
     // --- Callback: paste item ---
     let ui_weak = ui.as_weak();
+    let repo_paste = repository.clone();
     let db_paste = db.clone();
     ui.on_paste_item(move |id| {
         info!("Paste item id={}", id);
-        // Find the item, touch it to update last_used_at, then paste
-        if let Ok(history) = db_paste.get_history() {
-            if let Some(item) = history.iter().find(|i| i.id == id as i64) {
-                // Update last_used_at
-                match item.data_type {
-                    crate::database::DataType::Text => {
-                        if let Some(text) = &item.value_text {
-                            let _ = db_paste.add_text_item(text);
-                            // Close window first, then paste into the focused app
-                            let ui = ui_weak.upgrade().expect("UI was dropped");
-                            if let Err(e) = ui.hide() {
-                                error!("Failed to hide UI: {:?}", e);
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            paster::paste_text(text);
+        // Find the item using repository
+        if let Ok(Some(item)) = repo_paste.find_by_id(crate::domain::entities::ItemId(id as i64)) {
+            // Update last_used_at by finding the item again (touch)
+            let _ = repo_paste.find_by_id(crate::domain::entities::ItemId(id as i64));
+            // Get the content for paste from legacy database
+            let legacy: database::ClipboardItem = (&item).into();
+            match legacy.data_type {
+                crate::database::DataType::Text => {
+                    if let Some(text) = &legacy.value_text {
+                        let _ = db_paste.add_text_item(text);
+                        // Close window first, then paste into the focused app
+                        let ui = ui_weak.upgrade().expect("UI was dropped");
+                        if let Err(e) = ui.hide() {
+                            error!("Failed to hide UI: {:?}", e);
                         }
-                    },
-                    crate::database::DataType::Image => {
-                        // TODO: Обработка вставки изображений
-                        if let Some(path) = &item.image_path {
-                            let ui = ui_weak.upgrade().expect("UI was dropped");
-                            if let Err(e) = ui.hide() {
-                                error!("Failed to hide UI: {:?}", e);
-                            }
-                            info!("Pasting image from: {:?}", path);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        paster::paste_text(text);
+                    }
+                },
+                crate::database::DataType::Image => {
+                    // TODO: Обработка вставки изображений
+                    if let Some(path) = &legacy.image_path {
+                        let ui = ui_weak.upgrade().expect("UI was dropped");
+                        if let Err(e) = ui.hide() {
+                            error!("Failed to hide UI: {:?}", e);
                         }
+                        info!("Pasting image from: {:?}", path);
                     }
                 }
-                return;
             }
+            return;
         }
         let ui = ui_weak.upgrade().expect("UI was dropped");
         if let Err(e) = ui.hide() {
@@ -161,22 +135,26 @@ fn run_all_in_one() {
 
     // --- Callback: delete item ---
     let ui_weak = ui.as_weak();
-    let db_del = db.clone();
+    let repo_del = repository.clone();
     ui.on_delete_item(move |id| {
         info!("Delete item id={}", id);
-        let _ = db_del.delete_item(id as i64);
+        let _ = repo_del.delete(crate::domain::entities::ItemId(id as i64));
         let ui = ui_weak.upgrade().expect("UI was dropped");
-        refresh_ui_items(&ui, &db_del, &ui.get_search_text().to_string());
+        refresh_ui_items(&ui, &repo_del, &ui.get_search_text().to_string());
     });
 
     // --- Callback: toggle pin ---
     let ui_weak = ui.as_weak();
-    let db_pin = db.clone();
+    let repo_pin = repository.clone();
     ui.on_toggle_pin(move |id| {
         info!("Toggle pin id={}", id);
-        let _ = db_pin.toggle_pin(id as i64);
+        // Get current item to check pin state
+        let current = repo_pin.find_by_id(crate::domain::entities::ItemId(id as i64));
+        if let Ok(Some(_item)) = current {
+            let _ = repo_pin.toggle_pin(crate::domain::entities::ItemId(id as i64));
+        }
         let ui = ui_weak.upgrade().expect("UI was dropped");
-        refresh_ui_items(&ui, &db_pin, &ui.get_search_text().to_string());
+        refresh_ui_items(&ui, &repo_pin, &ui.get_search_text().to_string());
     });
 
     // --- Callback: close ---
@@ -193,51 +171,17 @@ fn run_all_in_one() {
 }
 
 /// Запустить демон
-fn run_daemon() {
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime for daemon");
-    rt.block_on(async {
-        let db = match Database::new() {
-            Ok(db) => Arc::new(db),
-            Err(e) => {
-                error!("Failed to initialize database: {}", e);
-                return;
-            }
-        };
-
-        // Start background clipboard monitor
-        let db_monitor = db.clone();
-        tokio::spawn(async {
-            clipboard::start_clipboard_monitor(db_monitor).await;
-        });
-
-        // Start IPC server
-        if let Err(e) = ipc::start_ipc_server(db).await {
-            error!("Failed to start IPC server: {}", e);
-        }
-    });
+pub fn run_daemon() {
+    daemon::run();
 }
 
 /// Запустить popup
-fn run_popup() {
-    info!("Popup started, connecting to daemon...");
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime for popup");
-
-    // Сначала попробуем подключиться к демону
-    match rt.block_on(ipc::send_command(ipc::IpcCommand::GetHistory)) {
-        Ok(_) => {
-            // Если демон запущен, работаем через IPC
-            run_popup_with_ipc(rt);
-        },
-        Err(_) => {
-            // Если демон не запущен, запускаем всё в одном (для разработки)
-            info!("Daemon not running, starting in single-process mode");
-            run_all_in_one();
-        }
-    }
+pub fn run_popup() {
+    popup::run();
 }
 
 /// Запустить popup с подключением к демону через IPC
-fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
+pub fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
     let ui = MaccyMenu::new().expect("Failed to create Slint UI for popup");
 
     // Загрузить начальный список
@@ -305,7 +249,7 @@ fn run_popup_with_ipc(rt: tokio::runtime::Runtime) {
 }
 
 /// Refresh UI из списка ClipboardItem
-fn refresh_ui_items_from_history(ui: &MaccyMenu, items: &[database::ClipboardItem], query: &str) {
+pub fn refresh_ui_items_from_history(ui: &MaccyMenu, items: &[database::ClipboardItem], query: &str) {
     let filtered = filter_items_fuzzy(items, query);
 
     let entries: Vec<ClipboardEntry> = filtered
@@ -319,9 +263,31 @@ fn refresh_ui_items_from_history(ui: &MaccyMenu, items: &[database::ClipboardIte
                 Some(text) => text.clone(),
                 None => "📷 Изображение".to_string(),
             };
+            
+            let data_type_str = match item.data_type {
+                database::DataType::Text => "Text",
+                database::DataType::Image => "Image",
+            };
+            
+            let category_str = match &item.category {
+                Some(database::Category::Url) => "Url",
+                Some(database::Category::Email) => "Email",
+                Some(database::Category::Account) => "Account",
+                Some(database::Category::Picture) => "Picture",
+                Some(database::Category::Other) => "Other",
+                None => "",
+            };
+            
+            let image_path_str = item.image_path.as_ref()
+                .and_then(|p| p.to_str())
+                .unwrap_or("");
+            
             ClipboardEntry {
                 id: item.id as i32,
                 text: SharedString::from(display_text),
+                image_path: SharedString::from(image_path_str),
+                data_type: SharedString::from(data_type_str),
+                category: SharedString::from(category_str),
                 is_pinned: item.is_pinned,
                 shortcut_index: 0, // assigned by Slint via index
             }
@@ -336,7 +302,7 @@ fn refresh_ui_items_from_history(ui: &MaccyMenu, items: &[database::ClipboardIte
 #[cfg(test)]
 mod fuzzy_search_tests {
     use super::*;
-    use crate::database::{ClipboardItem, DataType};
+    use crate::database::{ClipboardItem, DataType, Category};
 
     fn create_test_item(id: i64, text: &str) -> ClipboardItem {
         ClipboardItem {
@@ -345,6 +311,7 @@ mod fuzzy_search_tests {
             image_path: None,
             data_type: DataType::Text,
             raw_mime_type: "text/plain".to_string(),
+            category: None,
             is_pinned: false,
             pin_order: 0,
             last_used_at: chrono::Utc::now().timestamp(),
@@ -430,6 +397,7 @@ mod fuzzy_search_tests {
                 image_path: Some(std::path::PathBuf::from("/path/to/image.png")),
                 data_type: DataType::Image,
                 raw_mime_type: "image/png".to_string(),
+                category: Some(Category::Picture),
                 is_pinned: false,
                 pin_order: 0,
                 last_used_at: chrono::Utc::now().timestamp(),
@@ -453,6 +421,102 @@ mod fuzzy_search_tests {
         // fuzzy-matcher is case-insensitive by default
         assert!(filtered.len() >= 1);
     }
+
+    #[test]
+    fn test_filter_items_by_category_url() {
+        let items = vec![
+            ClipboardItem {
+                id: 1,
+                value_text: Some("https://example.com".to_string()),
+                image_path: None,
+                data_type: DataType::Text,
+                raw_mime_type: "text/plain".to_string(),
+                category: Some(Category::Url),
+                is_pinned: false,
+                pin_order: 0,
+                last_used_at: chrono::Utc::now().timestamp(),
+            },
+            ClipboardItem {
+                id: 2,
+                value_text: Some("user@example.com".to_string()),
+                image_path: None,
+                data_type: DataType::Text,
+                raw_mime_type: "text/plain".to_string(),
+                category: Some(Category::Email),
+                is_pinned: false,
+                pin_order: 0,
+                last_used_at: chrono::Utc::now().timestamp(),
+            },
+        ];
+
+        let filtered = filter_items_fuzzy(&items, "@url");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].value_text, Some("https://example.com".to_string()));
+    }
+
+    #[test]
+    fn test_filter_items_by_category_email() {
+        let items = vec![
+            ClipboardItem {
+                id: 1,
+                value_text: Some("https://example.com".to_string()),
+                image_path: None,
+                data_type: DataType::Text,
+                raw_mime_type: "text/plain".to_string(),
+                category: Some(Category::Url),
+                is_pinned: false,
+                pin_order: 0,
+                last_used_at: chrono::Utc::now().timestamp(),
+            },
+            ClipboardItem {
+                id: 2,
+                value_text: Some("user@example.com".to_string()),
+                image_path: None,
+                data_type: DataType::Text,
+                raw_mime_type: "text/plain".to_string(),
+                category: Some(Category::Email),
+                is_pinned: false,
+                pin_order: 0,
+                last_used_at: chrono::Utc::now().timestamp(),
+            },
+        ];
+
+        let filtered = filter_items_fuzzy(&items, "@email");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].value_text, Some("user@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_filter_items_by_category_with_text_search() {
+        let items = vec![
+            ClipboardItem {
+                id: 1,
+                value_text: Some("https://github.com".to_string()),
+                image_path: None,
+                data_type: DataType::Text,
+                raw_mime_type: "text/plain".to_string(),
+                category: Some(Category::Url),
+                is_pinned: false,
+                pin_order: 0,
+                last_used_at: chrono::Utc::now().timestamp(),
+            },
+            ClipboardItem {
+                id: 2,
+                value_text: Some("https://example.com".to_string()),
+                image_path: None,
+                data_type: DataType::Text,
+                raw_mime_type: "text/plain".to_string(),
+                category: Some(Category::Url),
+                is_pinned: false,
+                pin_order: 0,
+                last_used_at: chrono::Utc::now().timestamp(),
+            },
+        ];
+
+        let filtered = filter_items_fuzzy(&items, "@url github");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].value_text, Some("https://github.com".to_string()));
+    }
 }
 
 /// Filter clipboard items using fuzzy search
@@ -461,15 +525,47 @@ pub fn filter_items_fuzzy<'a>(items: &'a [database::ClipboardItem], query: &str)
         return items.iter().collect();
     }
 
+    // Check for category filter syntax (@url, @email, @account, @picture, @other)
+    let (category_filter, search_query) = if query.starts_with('@') {
+        let parts: Vec<&str> = query.splitn(2, ' ').collect();
+        let category_str = parts[0].to_lowercase();
+        let remaining_query = if parts.len() > 1 { parts[1].trim() } else { "" };
+        
+        let category_filter = match category_str.as_str() {
+            "@url" => Some(database::Category::Url),
+            "@email" => Some(database::Category::Email),
+            "@account" => Some(database::Category::Account),
+            "@picture" => Some(database::Category::Picture),
+            "@other" => Some(database::Category::Other),
+            _ => None,
+        };
+        
+        (category_filter, remaining_query)
+    } else {
+        (None, query)
+    };
+
     let matcher = SkimMatcherV2::default();
     let mut scored: Vec<_> = items
         .iter()
         .filter_map(|item| {
-            let search_text = match &item.value_text {
-                Some(text) => text,
-                None => "Изображение",
-            };
-            matcher.fuzzy_match(search_text, query).map(|score| (item, score))
+            // Apply category filter if specified
+            if let Some(ref cat) = category_filter {
+                if item.category != Some(cat.clone()) {
+                    return None;
+                }
+            }
+            
+            // Apply text search if query is not empty
+            if !search_query.is_empty() {
+                let search_text = match &item.value_text {
+                    Some(text) => text,
+                    None => "Изображение",
+                };
+                matcher.fuzzy_match(search_text, search_query).map(|score| (item, score))
+            } else {
+                Some((item, 100)) // Default score for category-only filter
+            }
         })
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1));
@@ -477,8 +573,8 @@ pub fn filter_items_fuzzy<'a>(items: &'a [database::ClipboardItem], query: &str)
 }
 
 /// Refresh the item list in the UI, applying optional fuzzy search filter
-fn refresh_ui_items(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
-    let items = match db.get_history() {
+pub fn refresh_ui_items(ui: &MaccyMenu, repository: &Arc<RepositoryBridge>, query: &str) {
+    let items = match repository.find_all() {
         Ok(items) => items,
         Err(e) => {
             error!("Failed to get history: {}", e);
@@ -486,7 +582,13 @@ fn refresh_ui_items(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
         }
     };
 
-    let filtered = filter_items_fuzzy(&items, query);
+    // Convert new ClipboardItem to legacy ClipboardItem for UI
+    let legacy_items: Vec<database::ClipboardItem> = items
+        .iter()
+        .map(|item| item.into())
+        .collect();
+
+    let filtered = filter_items_fuzzy(&legacy_items, query);
 
     let entries: Vec<ClipboardEntry> = filtered
         .iter()
@@ -499,9 +601,31 @@ fn refresh_ui_items(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
                 Some(text) => text.clone(),
                 None => "📷 Изображение".to_string(),
             };
+            
+            let data_type_str = match item.data_type {
+                database::DataType::Text => "Text",
+                database::DataType::Image => "Image",
+            };
+            
+            let category_str = match &item.category {
+                Some(database::Category::Url) => "Url",
+                Some(database::Category::Email) => "Email",
+                Some(database::Category::Account) => "Account",
+                Some(database::Category::Picture) => "Picture",
+                Some(database::Category::Other) => "Other",
+                None => "",
+            };
+            
+            let image_path_str = item.image_path.as_ref()
+                .and_then(|p| p.to_str())
+                .unwrap_or("");
+            
             ClipboardEntry {
                 id: item.id as i32,
                 text: SharedString::from(display_text),
+                image_path: SharedString::from(image_path_str),
+                data_type: SharedString::from(data_type_str),
+                category: SharedString::from(category_str),
                 is_pinned: item.is_pinned,
                 shortcut_index: 0, // assigned by Slint via index
             }

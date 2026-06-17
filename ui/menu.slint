@@ -4,6 +4,9 @@ import { VerticalBox, HorizontalBox, ListView, LineEdit, Palette } from "std-wid
 export struct ClipboardEntry {
     id: int,
     text: string,
+    image-path: string,
+    data-type: string, // "Text" or "Image"
+    category: string, // "Url", "Email", "Account", "Picture", "Other", or ""
     is-pinned: bool,
     shortcut-index: int, // 0 = no shortcut, 1-9 = Alt+N
 }
@@ -11,6 +14,9 @@ export struct ClipboardEntry {
 // --- Individual list item ---
 component ClipItem inherits Rectangle {
     in property <string> item-text;
+    in property <string> image-path;
+    in property <string> data-type;
+    in property <string> category;
     in property <bool> pinned;
     in property <bool> selected;
     in property <int> shortcut-index;
@@ -32,6 +38,16 @@ component ClipItem inherits Rectangle {
         padding-right: 12px;
         spacing: 8px;
 
+        // Category icon
+        if category != "" : Text {
+            text: category == "Url" ? "🔗" :
+                  category == "Email" ? "📧" :
+                  category == "Account" ? "👤" :
+                  category == "Picture" ? "🖼️" : "📄";
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+
         // Pin icon
         if pinned : Text {
             text: "📌";
@@ -39,8 +55,15 @@ component ClipItem inherits Rectangle {
             vertical-alignment: center;
         }
 
+        // Image preview indicator (thumbnail)
+        if data-type == "Image" : Text {
+            text: "🖼️";
+            font-size: 24px;
+            vertical-alignment: center;
+        }
+
         // Main text (single line, ellipsis)
-        Text {
+        if data-type == "Text" : Text {
             text: item-text;
             font-size: 13px;
             color: selected ? white : #e0e0e0;
@@ -206,6 +229,9 @@ export component MaccyMenu inherits Window {
 
             for entry[i] in items : ClipItem {
                 item-text: entry.text;
+                image-path: entry.image-path;
+                data-type: entry.data-type;
+                category: entry.category;
                 pinned: entry.is-pinned;
                 selected: i == current-index;
                 shortcut-index: i < 9 ? i + 1 : 0;
