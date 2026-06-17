@@ -8,8 +8,11 @@ use tokio::time::sleep;
 
 #[derive(Clone)]
 pub struct MonitorService {
+    #[allow(dead_code)] // Used for clipboard monitoring logic
     repository: Arc<dyn ClipboardRepository>,
+    #[allow(dead_code)] // Track last clipboard text for deduplication
     last_text: Arc<std::sync::Mutex<String>>,
+    #[allow(dead_code)] // Track monitoring state
     is_running: Arc<AtomicBool>,
 }
 

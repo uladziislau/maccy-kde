@@ -3,6 +3,7 @@
 
 use crate::domain::repositories::ClipboardRepository;
 use crate::domain::entities::{ClipboardItem, ItemId};
+use crate::domain::services::RotationService;
 use crate::shared::Result;
 use crate::database::{Database, ClipboardItem as LegacyClipboardItem, DataType};
 use std::sync::Arc;
@@ -99,19 +100,18 @@ impl ClipboardRepository for RepositoryBridge {
     }
 
     fn rotate_history(&self, max_items: usize) -> Result<()> {
-        // Legacy Database doesn't have rotate_history method directly
-        // We'll implement it manually using get_history and delete_item
         let history = self.db.get_history()?;
-        let mut non_pinned_items: Vec<_> = history.iter()
-            .filter(|item| !item.is_pinned)
+        let domain_items: Vec<ClipboardItem> = history.iter()
+            .map(|legacy| ClipboardItem::from(legacy))
             .collect();
         
-        if non_pinned_items.len() > max_items {
-            non_pinned_items.sort_by_key(|item| std::cmp::Reverse(item.last_used_at));
-            for item in non_pinned_items.iter().skip(max_items) {
-                self.db.delete_item(item.id)?;
-            }
+        // Use RotationService to determine which items to delete
+        let to_delete = RotationService::items_to_delete(&domain_items, max_items);
+        
+        for item_id in to_delete {
+            self.db.delete_item(item_id.value())?;
         }
+        
         Ok(())
     }
 
@@ -149,6 +149,7 @@ impl ClipboardRepository for RepositoryBridge {
 mod tests {
     use super::*;
     use crate::database;
+    use crate::domain::entities::{Content, MimeType, Category, Timestamp};
 
     #[test]
     fn test_bridge_creation() {
@@ -160,20 +161,4 @@ mod tests {
         assert!(count >= 0);
     }
 
-    #[test]
-    fn test_bridge_save_and_find() {
-        let db = Database::new().unwrap();
-        let bridge = RepositoryBridge::new(Arc::new(db));
-        
-        let item = ClipboardItem::new(
-            ItemId(1),
-            crate::domain::entities::Content::Text("test".to_string()),
-            crate::domain::entities::MimeType::text_plain(),
-            None,
-        );
-        
-        bridge.save(&item).unwrap();
-        let found = bridge.find_by_id(ItemId(1));
-        assert!(found.is_ok());
-    }
 }

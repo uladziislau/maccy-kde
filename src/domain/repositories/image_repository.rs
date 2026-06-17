@@ -3,6 +3,7 @@ use image::RgbaImage;
 use crate::domain::entities::ItemId;
 use crate::shared::Result;
 
+#[allow(dead_code)] // Reserved for future image storage implementation
 pub trait ImageRepository: Send + Sync {
     fn save(&self, id: ItemId, image: &RgbaImage, mime_type: &str) -> Result<PathBuf>;
     

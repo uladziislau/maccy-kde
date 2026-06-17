@@ -4,10 +4,12 @@ use crate::domain::entities::{ClipboardItem, ItemId, Content, Category, Timestam
 use crate::domain::repositories::ClipboardRepository;
 use crate::shared::Result as MaccyResult;
 
+#[allow(dead_code)] // Reserved for future migration to new architecture
 pub struct SqliteClipboardRepository {
     conn: Arc<Mutex<Connection>>,
 }
 
+#[allow(dead_code)]
 impl SqliteClipboardRepository {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }

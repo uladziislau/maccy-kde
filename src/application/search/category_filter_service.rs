@@ -1,7 +1,9 @@
 use crate::domain::entities::{ClipboardItem, Category};
 
+#[allow(dead_code)] // Used in PopupService
 pub struct CategoryFilterService;
 
+#[allow(dead_code)] // Methods used in PopupService
 impl CategoryFilterService {
     /// Filter items by category
     pub fn filter_by_category<'a>(items: &'a [ClipboardItem], category: &Category) -> Vec<&'a ClipboardItem> {

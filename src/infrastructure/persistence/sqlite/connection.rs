@@ -4,8 +4,10 @@ use crate::infrastructure::system::paths::AppPaths;
 use crate::shared::Result as MaccyResult;
 use crate::shared::MaccyError;
 
+#[allow(dead_code)] // Reserved for future migration to new architecture
 pub struct SqlConnection;
 
+#[allow(dead_code)]
 impl SqlConnection {
     pub fn open(path: PathBuf) -> MaccyResult<Connection> {
         // Ensure parent directory exists

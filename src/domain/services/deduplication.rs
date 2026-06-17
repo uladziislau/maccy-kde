@@ -1,8 +1,10 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+#[allow(dead_code)] // Reserved for future deduplication enhancement
 pub struct DeduplicationService;
 
+#[allow(dead_code)]
 impl DeduplicationService {
     pub fn compute_text_hash(text: &str) -> u64 {
         let mut hasher = DefaultHasher::new();

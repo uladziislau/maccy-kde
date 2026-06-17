@@ -1,5 +1,6 @@
 use crate::domain::entities::{ClipboardItem, ItemId, Category};
 use crate::application::search::FuzzySearchService;
+use crate::application::search::CategoryFilterService;
 use crate::application::category::CategoryService;
 use crate::domain::repositories::ClipboardRepository;
 use crate::shared::Result;
@@ -134,6 +135,19 @@ impl PopupService {
         items.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
         
         Ok(items.into_iter().take(limit).collect())
+    }
+
+    /// Get items filtered by category
+    pub fn get_items_by_category(&self, category: &Category) -> Result<Vec<ClipboardItem>> {
+        let all_items = self.repository.find_all()?;
+        let filtered = CategoryFilterService::filter_by_category(&all_items, category);
+        Ok(filtered.into_iter().cloned().collect())
+    }
+
+    /// Count items by category
+    pub fn count_by_category(&self, category: &Category) -> Result<usize> {
+        let all_items = self.repository.find_all()?;
+        Ok(CategoryFilterService::count_by_category(&all_items, category))
     }
 }
 
@@ -338,6 +352,40 @@ mod tests {
         let service = PopupService::new(repo, 100);
         let count = service.get_display_count(None).unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_get_items_by_category() {
+        let repo = Arc::new(MockRepo::new());
+        repo.add_item(1, "https://example.com", Some(Category::Url));
+        repo.add_item(2, "https://github.com", Some(Category::Url));
+        repo.add_item(3, "user@example.com", Some(Category::Email));
+        repo.add_item(4, "plain text", Some(Category::Other));
+        
+        let service = PopupService::new(repo, 100);
+        let url_items = service.get_items_by_category(&Category::Url).unwrap();
+        assert_eq!(url_items.len(), 2);
+        
+        let email_items = service.get_items_by_category(&Category::Email).unwrap();
+        assert_eq!(email_items.len(), 1);
+    }
+
+    #[test]
+    fn test_count_by_category() {
+        let repo = Arc::new(MockRepo::new());
+        repo.add_item(1, "https://example.com", Some(Category::Url));
+        repo.add_item(2, "https://github.com", Some(Category::Url));
+        repo.add_item(3, "user@example.com", Some(Category::Email));
+        
+        let service = PopupService::new(repo, 100);
+        let url_count = service.count_by_category(&Category::Url).unwrap();
+        assert_eq!(url_count, 2);
+        
+        let email_count = service.count_by_category(&Category::Email).unwrap();
+        assert_eq!(email_count, 1);
+        
+        let account_count = service.count_by_category(&Category::Account).unwrap();
+        assert_eq!(account_count, 0);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::shared::Result;
 use std::sync::Arc;
 
 pub struct ItemManagementService {
+    #[allow(dead_code)] // Used internally via methods
     repository: Arc<dyn ClipboardRepository>,
 }
 

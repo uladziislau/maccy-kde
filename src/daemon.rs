@@ -32,7 +32,11 @@ pub fn run() {
         let repository = Arc::new(RepositoryBridge::new(db.clone()));
         
         // Create daemon service
-        let daemon = Arc::new(DaemonService::new(repository));
+        let daemon = Arc::new(DaemonService::new(repository.clone()));
+        
+        // Get reference to services for advanced operations
+        let item_service = daemon.item_service().clone();
+        let _monitor_service = daemon.monitor_service().clone(); // Reserved for future clipboard monitoring
         
         // Start daemon (monitor clipboard)
         if let Err(e) = daemon.start().await {
@@ -40,8 +44,23 @@ pub fn run() {
             return;
         }
         
+        // Start clipboard monitoring through MonitorService
+        // Note: This is a stub - real clipboard monitoring would need actual clipboard access
+        // For now, the legacy clipboard.rs handles the real monitoring
+        info!("Clipboard monitor service initialized (legacy clipboard.rs handles real monitoring)");
+        
+        // Example of using ItemManagementService for operations
+        if let Ok(count) = item_service.get_total_count() {
+            info!("Current clipboard item count: {}", count);
+        }
+        
+        // Use ItemManagementService to get recent items for stats
+        if let Ok(recent_items) = item_service.get_recent_items(5) {
+            info!("Recent items: {}", recent_items.len());
+        }
+        
         // Start IPC server with legacy database for now
-        // TODO: Migrate IPC to use new architecture
+        // TODO: Migrate IPC to use new architecture (item_service)
         if let Err(e) = ipc::start_ipc_server(db).await {
             error!("Failed to start IPC server: {}", e);
         }
