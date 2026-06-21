@@ -2,8 +2,11 @@
 Type=Application
 Name=maccy-kde
 Comment=Clipboard manager for KDE Plasma
-Exec=maccy-kde --daemon
+Exec=maccy-kde
 Icon=edit-paste
 Terminal=false
 Categories=Utility;
 Keywords=clipboard;manager;kde;
+
+# For custom keyboard shortcut in KDE:
+# Run: maccy-kde --toggle
