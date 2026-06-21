@@ -5,6 +5,7 @@ mod ipc;
 mod autostart;
 
 mod bootstrap;
+mod hotkey;
 mod infrastructure;
 
 use log::{info, error};
@@ -48,6 +49,9 @@ pub fn run_all_in_one() {
 
     let ui = MaccyMenu::new().expect("Failed to create Slint UI");
 
+    // Start invisible. UI is shown/hidden only via hotkey callback.
+    ui.hide().ok();
+
     refresh_ui(&ui, &db, "");
 
     // --- search ---
@@ -62,25 +66,33 @@ pub fn run_all_in_one() {
     let ui_weak = ui.as_weak();
     let db_paste = db.clone();
     ui.on_paste_item(move |id| {
-        info!("Paste item id={}", id);
-        let ui = ui_weak.upgrade().expect("UI was dropped");
+        let ui = match ui_weak.upgrade() {
+            Some(ui) => ui,
+            None => return,
+        };
+        // Only handle paste when window is visible — ignore spurious calls
+        if !ui.window().is_visible() {
+            info!("on_paste_item id={} ignored (window not visible)", id);
+            return;
+        }
+        info!("Paste item id={} visible={}", id, ui.window().is_visible());
         let text = if let Ok(items) = db_paste.get_history() {
             items.iter().find(|i| i.id == id as i64)
                 .and_then(|item| item.value_text.clone())
         } else {
             None
         };
-        if let Some(ref text) = text {
-            let _ = db_paste.add_text_item(text);
-            if let Err(e) = ui.hide() {
-                error!("Failed to hide UI: {:?}", e);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            paster::paste_text(text);
+        if let Some(text) = text {
+            let _ = db_paste.add_text_item(&text);
+            let _ = ui.hide();
+            // Paste action must not run inside the Slint event loop —
+            // it uses subprocesses/osascript that can conflict with Cocoa.
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                paster::paste_text(&text);
+            });
         } else {
-            if let Err(e) = ui.hide() {
-                error!("Failed to hide UI: {:?}", e);
-            }
+            let _ = ui.hide();
         }
     });
 
@@ -113,7 +125,39 @@ pub fn run_all_in_one() {
         }
     });
 
-    ui.run().expect("Failed to run Slint event loop");
+    // --- global hotkey ---
+    let ui_weak = ui.as_weak();
+    let db_hotkey = db.clone();
+    if let Err(e) = hotkey::register(move || {
+        info!("Hotkey callback invoked on AppKit main thread");
+        let weak = ui_weak.clone();
+        let db = db_hotkey.clone();
+        slint::invoke_from_event_loop(move || {
+            info!("Hotkey dispatched to Slint event loop");
+            if let Some(ui) = weak.upgrade() {
+                if ui.window().is_visible() {
+                    info!("Hotkey: hiding window");
+                    let _ = ui.hide();
+                } else {
+                    info!("Hotkey: showing window");
+                    refresh_ui(&ui, &db, "");
+                    if let Some((x, y)) = cursor_position() {
+                        ui.window().set_position(slint::LogicalPosition { x: x as f32, y: y as f32 });
+                    }
+                    if let Err(e) = ui.show() {
+                        error!("Failed to show UI from hotkey: {:?}", e);
+                    }
+                }
+            }
+        })
+        .ok();
+    }) {
+        error!("Failed to register global hotkey: {}", e);
+    }
+
+    // Use run_event_loop_until_quit so that hide() doesn't exit the event loop.
+    // The window is shown/hidden by the NSMenuItem hotkey.
+    slint::run_event_loop_until_quit().expect("Failed to run Slint event loop");
 }
 
 fn filter_items<'a>(items: &'a [ClipboardItem], query: &str) -> Vec<&'a ClipboardItem> {
@@ -217,6 +261,13 @@ fn item_to_entry(item: &ClipboardItem) -> ClipboardEntry {
         is_pinned: item.is_pinned,
         shortcut_index: 0,
     }
+}
+
+fn cursor_position() -> Option<(f64, f64)> {
+    use enigo::{Enigo, Mouse, Settings};
+    let enigo = Enigo::new(&Settings::default()).ok()?;
+    let (x, y) = enigo.location().ok()?;
+    Some((x as f64, y as f64))
 }
 
 #[cfg(test)]

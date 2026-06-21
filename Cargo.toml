@@ -22,7 +22,6 @@ icon = "assets/icon.icns"
 minimize_window = false
 high_resolution = true
 info_plist_extra = {
-    LSUIElement = true,
     NSRequiresAquaSystemAppearance = false
 }
 
@@ -55,3 +54,6 @@ zbus = "3.14.1"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Фолбэк для разработки на macOS (с поллингом)
 arboard = "3.4.0"
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
