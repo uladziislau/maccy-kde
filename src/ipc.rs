@@ -14,6 +14,7 @@ pub enum IpcCommand {
     SelectItem { id: i64 },
     TogglePin { id: i64 },
     DeleteItem { id: i64 },
+    ClearUnpinned,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -76,7 +77,9 @@ async fn handle_client(stream: UnixStream, db: Arc<Database>) {
                 if let Err(e) = stream.write_all(resp_json.as_bytes()).await {
                     error!("Failed to write response: {}", e);
                 }
-                let _ = stream.write_all(b"\n").await;
+                if let Err(e) = stream.write_all("\n".as_bytes()).await {
+                       error!("Failed to write newline: {}", e);
+                   }
             }
             Err(e) => error!("Failed to parse command: {}", e),
         }
@@ -101,7 +104,9 @@ async fn handle_command(cmd: IpcCommand, db: Arc<Database>) -> IpcResponse {
                             }
                         }
                         DataType::Image => {
-                            // TODO: Активировать буфер обмена и вставить изображение
+                            if let Some(path) = &item.image_path {
+                                crate::paster::paste_image(path);
+                            }
                         }
                     }
                     // Возвращаем обновленную историю
@@ -125,6 +130,13 @@ async fn handle_command(cmd: IpcCommand, db: Arc<Database>) -> IpcResponse {
                 Err(e) => IpcResponse::Error(format!("Failed to get history after delete: {}", e)),
             },
             Err(e) => IpcResponse::Error(format!("Failed to delete item: {}", e)),
+        },
+        IpcCommand::ClearUnpinned => match db.clear_unpinned() {
+            Ok(_) => match db.get_history() {
+                Ok(items) => IpcResponse::History(items),
+                Err(e) => IpcResponse::Error(format!("Failed to get history after clear: {}", e)),
+            },
+            Err(e) => IpcResponse::Error(format!("Failed to clear unpinned: {}", e)),
         },
     }
 }

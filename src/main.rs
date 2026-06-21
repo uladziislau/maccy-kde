@@ -160,6 +160,29 @@ pub fn run_all_in_one() {
     slint::run_event_loop_until_quit().expect("Failed to run Slint event loop");
 }
 
+fn format_relative_time(millis: i64) -> String {
+    let now = chrono::Utc::now().timestamp_millis();
+    let diff = (now - millis).abs() / 1000;
+
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
+}
+
+fn is_likely_code(text: &str) -> bool {
+    let code_indicators = ["{", "}", ";", "fn ", "let ", "var ", "const ", "import ", "from ", "public ", "private ", "class "];
+    if text.lines().count() > 1 {
+        return true;
+    }
+    code_indicators.iter().any(|&ind| text.contains(ind))
+}
+
 fn filter_items<'a>(items: &'a [ClipboardItem], query: &str) -> Vec<&'a ClipboardItem> {
     if query.is_empty() {
         return items.iter().collect();
@@ -216,13 +239,13 @@ fn refresh_ui(ui: &MaccyMenu, db: &Arc<Database>, query: &str) {
     };
 
     let filtered = filter_items(&items, query);
-    let entries: Vec<ClipboardEntry> = filtered.iter().map(|item| item_to_entry(item)).collect();
+    let entries: Vec<ClipboardEntry> = filtered.iter().enumerate().map(|(i, item)| item_to_entry(item, i)).collect();
     let model = Rc::new(VecModel::from(entries));
     ui.set_items(ModelRc::from(model));
     ui.set_current_index(0);
 }
 
-fn item_to_entry(item: &ClipboardItem) -> ClipboardEntry {
+fn item_to_entry(item: &ClipboardItem, index: usize) -> ClipboardEntry {
     let display_text = match &item.value_text {
         Some(text) if text.chars().count() > 100 => {
             let truncated: String = text.chars().take(100).collect();
@@ -232,34 +255,16 @@ fn item_to_entry(item: &ClipboardItem) -> ClipboardEntry {
         None => "📷 Изображение".to_string(),
     };
 
-    let data_type_str = match item.data_type {
-        DataType::Text => "Text",
-        DataType::Image => "Image",
-    };
-
-    let category_str = match &item.category {
-        Some(database::Category::Url) => "Url",
-        Some(database::Category::Email) => "Email",
-        Some(database::Category::Account) => "Account",
-        Some(database::Category::Picture) => "Picture",
-        Some(database::Category::Other) => "Other",
-        None => "",
-    };
-
-    let image_path_str = item
-        .image_path
-        .as_ref()
-        .and_then(|p| p.to_str())
-        .unwrap_or("");
+    let is_code = item.value_text.as_ref().map(|t| is_likely_code(t)).unwrap_or(false);
 
     ClipboardEntry {
         id: item.id as i32,
         text: SharedString::from(display_text),
-        image_path: SharedString::from(image_path_str),
-        data_type: SharedString::from(data_type_str),
-        category: SharedString::from(category_str),
+        timestamp: SharedString::from(format_relative_time(item.last_used_at)),
         is_pinned: item.is_pinned,
-        shortcut_index: 0,
+        is_image: item.data_type == DataType::Image,
+        is_code,
+        shortcut_index: if (index as i32) < 9 { (index as i32) + 1 } else { 0 },
     }
 }
 

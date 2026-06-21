@@ -58,9 +58,45 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
     });
 }
 
+fn is_sensitive_mime(mime: &str) -> bool {
+    let sensitive_mimes = [
+        "x-kde-passwordManagerHint",
+        "application/x-password-manager-hint",
+        "text/x-password",
+        "secret",
+        "password",
+        "private",
+    ];
+    sensitive_mimes.iter().any(|&m| mime.contains(m))
+}
+
+fn compute_image_hash(bytes: &[u8]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_sensitive_mime() {
+        assert!(is_sensitive_mime("x-kde-passwordManagerHint"));
+        assert!(is_sensitive_mime("application/x-password-manager-hint"));
+        assert!(is_sensitive_mime("text/x-password"));
+        assert!(is_sensitive_mime("some-secret-data"));
+        assert!(!is_sensitive_mime("text/plain"));
+        assert!(!is_sensitive_mime("image/png"));
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub async fn start_clipboard_monitor(db: Arc<Database>) {
     use wayland_clipboard_listener::WaylandClipboardListener;
+
     log::info!("Starting Wayland clipboard monitor");
 
     let mut listener = WaylandClipboardListener::new();
@@ -84,12 +120,4 @@ pub async fn start_clipboard_monitor(db: Arc<Database>) {
             }
         }
     }
-}
-
-fn compute_image_hash(bytes: &[u8]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
 }
