@@ -1,4 +1,19 @@
-/target
-.idea/
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+.directory
+
+# Build
+dist/
+*.egg
+*.whl
