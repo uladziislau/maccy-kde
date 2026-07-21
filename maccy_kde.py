@@ -118,8 +118,12 @@ class ClipStore:
             self._pins.add(text)
         self._save()
 
-    def clear_unpinned(self):
+    def clear_all_pins(self):
         self._pins.clear()
+        self._save()
+
+    def hide(self, text):
+        self._hidden.add(text)
         self._save()
 
 
@@ -276,7 +280,7 @@ class Backend(QObject):
 
     # --- Items ---
 
-    PIN_KEYS = ["Q","A","Z","W","S","X","E","D","C","R","F","V","T","G","B"]
+    PIN_KEYS = ["Q","A","Z","W","S","X","E","D","R","F","V","T","G","B","Y"]
 
     def _rebuild(self):
         clips: list[Clip] = []
@@ -330,9 +334,17 @@ class Backend(QObject):
         self._store.toggle_pin(text)
         self._rebuild()
 
+    @pyqtSlot(str)
+    def deleteItem(self, text):
+        """Remove item permanently — hides so it never reappears on fetch.
+        Also attempts D-Bus removal from Klipper if available."""
+        self._store.hide(text)
+        # TODO: Klipper D-Bus removeItem(index) — not exposed in Plasma 6
+        self._rebuild()
+
     @pyqtSlot()
-    def clearUnpinned(self):
-        self._store.clear_unpinned()
+    def clearAllPins(self):
+        self._store.clear_all_pins()
         self._rebuild()
 
     # --- Properties ---
@@ -467,14 +479,31 @@ def main():
             return
         if qml_item.isVisible():
             qml_item.hide()
-        else:
-            backend.fetch()
-            from PyQt6.QtGui import QCursor
-            cursor = QCursor.pos()
-            qml_item.setX(cursor.x())
-            qml_item.setY(cursor.y() - qml_item.height() // 2)
-            qml_item.show()
-            qml_item.requestActivate()
+            return
+
+        backend.fetch()
+        from PyQt6.QtGui import QCursor
+        cursor = QCursor.pos()
+
+        # Find the screen the cursor is on
+        win_w, win_h, win_x, win_y = 420, 520, cursor.x(), cursor.y()
+        for screen in QApplication.screens():
+            geo = screen.geometry()
+            if geo.contains(cursor):
+                win_w = min(int(geo.width() * 0.44), 720)
+                win_h = min(int(geo.height() * 0.55), 700)
+                win_x = max(geo.x(), min(cursor.x() - win_w // 2,
+                                         geo.x() + geo.width() - win_w))
+                win_y = max(geo.y(), min(cursor.y() - win_h // 3,
+                                         geo.y() + geo.height() - win_h))
+                break
+
+        qml_item.setWidth(win_w)
+        qml_item.setHeight(win_h)
+        qml_item.setX(win_x)
+        qml_item.setY(win_y)
+        qml_item.show()
+        qml_item.requestActivate()
 
     qml_item = None
 

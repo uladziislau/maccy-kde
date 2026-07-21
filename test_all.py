@@ -194,7 +194,7 @@ def test_backend_pinned_items_first():
     assert items[0]["pinned"] == True
 
 
-def test_backend_hide():
+def test_items_dont_reappear_after_hide():
     b = _make_backend()
     text = "Hello World"
     b._hidden.add(text)
@@ -202,11 +202,28 @@ def test_backend_hide():
     assert text not in [it["text"] for it in b.itemsModel]
 
 
-def test_backend_clear_unpinned():
+def test_backend_clear_all_pins():
     b = _make_backend()
     b._pinned.add("Hello World")
-    b.clearUnpinned()
+    b.clearAllPins()
     assert len(b._pinned) == 0
+
+
+def test_backend_delete_item(tmp_path, monkeypatch):
+    monkeypatch.setattr("maccy_kde.DATA_DIR", tmp_path)
+    b = _make_backend()
+    text = "Hello World"
+    assert text in [it["text"] for it in b.itemsModel]
+    b.deleteItem(text)
+    assert text not in [it["text"] for it in b.itemsModel]
+
+
+def test_backend_delete_item_persists(tmp_path):
+    from maccy_kde import ClipStore
+    store = ClipStore(tmp_path)
+    store.hide("secret")
+    store2 = ClipStore(tmp_path)
+    assert "secret" in store2.hidden
 
 
 # --- QML Loading ---
